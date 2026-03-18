@@ -4,16 +4,30 @@ export type SpeakOutMeta = {
   pageUrl: string;
 };
 
+const TAG_SLUGS = ['opinion', 'dh-speak-out', 'speak-out'];
+
 export async function getLatestSpeakOut(): Promise<SpeakOutMeta> {
-  const listUrl = 'https://www.deccanherald.com/tags/opinion';
+  let pageUrl = '';
 
-  const listResp = await fetch(listUrl, { cf: { cacheTtl: 300 } });
-  if (!listResp.ok) throw new Error(`Failed list fetch ${listUrl}: ${listResp.status}`);
-  const listHtml = await listResp.text();
+  for (const tag of TAG_SLUGS) {
+    const listUrl = `https://www.deccanherald.com/tags/${tag}`;
+    const listResp = await fetch(listUrl, { cf: { cacheTtl: 300 } });
+    if (!listResp.ok) {
+      console.warn(`Tag fetch failed for "${tag}": ${listResp.status}, trying next`);
+      continue;
+    }
+    const listHtml = await listResp.text();
+    const m = listHtml.match(/href="(\/opinion\/speak-out\/[^"]+)"/i);
+    if (!m) {
+      console.warn(`No Speak Out link found under tag "${tag}", trying next`);
+      continue;
+    }
+    pageUrl = new URL(m[1], 'https://www.deccanherald.com').toString();
+    console.log(`Found Speak Out link via tag "${tag}": ${pageUrl}`);
+    break;
+  }
 
-  const m = listHtml.match(/href="(\/opinion\/speak-out\/[^"]+)"/i);
-  if (!m) throw new Error('Could not find latest Speak Out link on tag page');
-  const pageUrl = new URL(m[1], 'https://www.deccanherald.com').toString();
+  if (!pageUrl) throw new Error('Could not find latest Speak Out link across all tag pages');
 
   let title = '';
   let imageUrl = '';

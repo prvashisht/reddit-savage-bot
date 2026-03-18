@@ -43,6 +43,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     token: string,
     postName: string | undefined,
     sourceUrl: string,
+    { skipDelay = false }: { skipDelay?: boolean } = {},
   ): Promise<CommentResult> => {
     if (!postName) return 'skipped';
 
@@ -50,8 +51,10 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       await commentOnPost(token, postName, `**Source:** ${sourceUrl}`);
     };
 
-    // Wait a bit before commenting — Reddit rate-limits actions taken immediately after posting
-    await sleep(5000);
+    if (!skipDelay) {
+      // Wait a bit before commenting — Reddit rate-limits actions taken immediately after posting
+      await sleep(5000);
+    }
 
     try {
       await attempt();
@@ -72,6 +75,25 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
         return 'failed';
       }
     }
+  };
+
+  // Check if the bot has already commented on a post; if not, add the source comment.
+  const tryEnsureComment = async (
+    token: string,
+    postName: string,
+    sourceUrl: string,
+  ): Promise<CommentResult> => {
+    try {
+      const postId = postName.replace(/^t3_/, '');
+      const comments = await getPostComments(token, SUBREDDIT, postId);
+      if (comments.some((c) => c.author === env.REDDIT_USERNAME)) {
+        console.log('Bot already commented on', postName, '— skipping');
+        return 'skipped';
+      }
+    } catch (e) {
+      console.warn('Could not fetch comments to check for existing comment (will attempt anyway):', e);
+    }
+    return tryComment(token, postName, sourceUrl, { skipDelay: true });
   };
 
   const tryFlair = async (token: string, postName: string, imageUrl: string): Promise<FlairResult> => {
@@ -105,10 +127,19 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     const token = await authenticateWithReddit(env);
 
     if (!skipLatestCheck) {
-      const firstPostTitle = await getFirstPostTitle(token, SUBREDDIT);
-      if (firstPostTitle.includes(title)) {
+      const recentPosts = await getRecentPosts(token, SUBREDDIT, 1);
+      const latestPost = recentPosts[0];
+      if (latestPost?.title.includes(title)) {
         console.log(`Latest speakout posted already: ${title}`);
-        return save({ lastRunAt: new Date().toISOString(), lastRunResult: 'skipped', lastPostedTitle: title, source });
+        const commentResult = await tryEnsureComment(token, latestPost.name, pageUrl);
+        return save({
+          lastRunAt: new Date().toISOString(),
+          lastRunResult: 'skipped',
+          lastPostedTitle: latestPost.title,
+          lastPostedUrl: latestPost.permalink,
+          commentResult,
+          source,
+        });
       }
     } else {
       console.log('[SKIP_LATEST_CHECK] Skipping already-posted check');
@@ -146,7 +177,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       const postName = result.name ?? newestPost.name;
       const postUrl = result.url ?? newestPost.url ?? newestPost.permalink;
       const [commentResult, flairResult] = await Promise.all([
-        tryComment(token, postName, pageUrl),
+        tryEnsureComment(token, postName, pageUrl),
         tryFlair(token, postName, imageUrl),
       ]);
       return save({
@@ -175,7 +206,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
         console.log('Link post verified in /new');
 
         const [commentResult, flairResult] = await Promise.all([
-          tryComment(token, result.name, pageUrl),
+          result.name ? tryEnsureComment(token, result.name, pageUrl) : Promise.resolve<CommentResult>('skipped'),
           tryFlair(token, result.name ?? '', imageUrl),
         ]);
         return save({
