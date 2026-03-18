@@ -13,7 +13,25 @@ import {
   type RedditPostContent,
 } from '../services/reddit';
 import { detectPartyFromImage } from '../services/openai';
-import { putRunState, type RunState, type CommentResult, type FlairResult } from '../store/run-state';
+import { putRunState, type RunState, type CommentResult, type FlairResult, type LogLevel, type LogEntry } from '../store/run-state';
+
+function makeLogger() {
+  const entries: LogEntry[] = [];
+  const add = (level: LogLevel, args: unknown[]): void => {
+    const msg = args
+      .map((a) => (a instanceof Error ? (a.stack ?? a.message) : typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a)))
+      .join(' ');
+    entries.push({ level, msg, ts: new Date().toISOString() });
+    // eslint-disable-next-line no-console
+    console[level](...(args as [unknown, ...unknown[]]));
+  };
+  return {
+    entries,
+    log: (...args: unknown[]) => add('log', args),
+    warn: (...args: unknown[]) => add('warn', args),
+    error: (...args: unknown[]) => add('error', args),
+  };
+}
 
 const SUBREDDIT = 'DHSavagery';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -29,14 +47,15 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
   const skipLatestCheck =
     options.skipLatestCheck ?? (env.SKIP_LATEST_CHECK === 'true' || env.SKIP_LATEST_CHECK === '1');
   const source = options.source ?? 'scheduled';
+  const logger = makeLogger();
 
   const save = async (state: RunState): Promise<RunState> => {
     try {
-      await putRunState(env.REDDIT_POSTER_STATE, state);
+      await putRunState(env.REDDIT_POSTER_STATE, { ...state, logs: logger.entries });
     } catch (e) {
-      console.error('Failed to write run state to KV', e);
+      logger.error('Failed to write run state to KV', e);
     }
-    return state;
+    return { ...state, logs: logger.entries };
   };
 
   const tryComment = async (
@@ -58,20 +77,20 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
 
     try {
       await attempt();
-      console.log('Source comment posted on', postName);
+      logger.log('Source comment posted on', postName);
       return 'posted';
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.warn('Comment attempt 1 failed, retrying in 30s:', msg);
+      logger.warn('Comment attempt 1 failed, retrying in 30s:', msg);
 
       // One retry after a longer wait (covers Reddit's typical ratelimit window)
       await sleep(30000);
       try {
         await attempt();
-        console.log('Source comment posted on', postName, '(retry)');
+        logger.log('Source comment posted on', postName, '(retry)');
         return 'posted';
       } catch (e2) {
-        console.error('Failed to post source comment after retry (non-fatal)', e2);
+        logger.error('Failed to post source comment after retry (non-fatal)', e2);
         return 'failed';
       }
     }
@@ -87,11 +106,11 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       const postId = postName.replace(/^t3_/, '');
       const comments = await getPostComments(token, SUBREDDIT, postId);
       if (comments.some((c) => c.author === env.REDDIT_USERNAME)) {
-        console.log('Bot already commented on', postName, '— skipping');
+        logger.log('Bot already commented on', postName, '— skipping');
         return 'skipped';
       }
     } catch (e) {
-      console.warn('Could not fetch comments to check for existing comment (will attempt anyway):', e);
+      logger.warn('Could not fetch comments to check for existing comment (will attempt anyway):', e);
     }
     return tryComment(token, postName, sourceUrl, { skipDelay: true });
   };
@@ -103,21 +122,21 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     try {
       const detection = await detectPartyFromImage(env.OPENAI_API_KEY, imageUrl);
       if (!detection.party) {
-        console.log('Flair: could not identify party —', detection.reason);
+        logger.log('Flair: could not identify party —', detection.reason);
         return { status: 'skipped', reason: detection.reason };
       }
       const templates = await getFlairTemplates(token, SUBREDDIT);
       const template = templates.find((t) => t.text.trim().toUpperCase() === detection.party!.toUpperCase());
       if (!template) {
-        console.log(`Flair: no template found for party "${detection.party}"`);
+        logger.log(`Flair: no template found for party "${detection.party}"`);
         return { status: 'skipped', reason: `No flair template for "${detection.party}"` };
       }
       await setPostFlair(token, SUBREDDIT, postName, template.id);
-      console.log(`Flair set: ${detection.party} (${detection.person})`);
+      logger.log(`Flair set: ${detection.party} (${detection.person})`);
       return { status: 'set', party: detection.party, person: detection.person };
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
-      console.error('Failed to set flair (non-fatal):', error);
+      logger.error('Failed to set flair (non-fatal):', error);
       return { status: 'failed', error };
     }
   };
@@ -130,7 +149,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       const recentPosts = await getRecentPosts(token, SUBREDDIT, 1);
       const latestPost = recentPosts[0];
       if (latestPost?.title.includes(title)) {
-        console.log(`Latest speakout posted already: ${title}`);
+        logger.log(`Latest speakout posted already: ${title}`);
         const commentResult = await tryEnsureComment(token, latestPost.name, pageUrl);
         return save({
           lastRunAt: new Date().toISOString(),
@@ -142,13 +161,13 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
         });
       }
     } else {
-      console.log('[SKIP_LATEST_CHECK] Skipping already-posted check');
+      logger.log('[SKIP_LATEST_CHECK] Skipping already-posted check');
     }
 
     const postTitle = `DH Speakout | ${title}`;
 
     if (dryRun) {
-      console.log('[DRY_RUN] Would post:', postTitle);
+      logger.log('[DRY_RUN] Would post:', postTitle);
       return save({ lastRunAt: new Date().toISOString(), lastRunResult: 'dry_run', lastPostedTitle: title, source });
     }
 
@@ -157,10 +176,10 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       const { imageUrlForSubmit } = await uploadImageToReddit(token, imageUrl);
       if (!imageUrlForSubmit) throw new Error('Image upload did not return a usable URL');
 
-      console.log('Uploaded image to Reddit:', imageUrlForSubmit);
+      logger.log('Uploaded image to Reddit:', imageUrlForSubmit);
       const result = await submitImagePost(token, SUBREDDIT, postTitle, imageUrlForSubmit);
       imageSubmitSucceeded = true;
-      console.log('Submitted image post:', result);
+      logger.log('Submitted image post:', result);
 
       await sleep(3000);
       const newestPosts = await getRecentPosts(token, SUBREDDIT, 1);
@@ -170,7 +189,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
           `Image post verification failed: newest post is "${newestPost?.title}", expected to contain "${title}"`,
         );
       }
-      console.log('Image post verified in /new:', newestPost.name);
+      logger.log('Image post verified in /new:', newestPost.name);
 
       // Reddit image submissions return the post name via WebSocket, not HTTP response.
       // We use the verified /new post to get the name for commenting.
@@ -191,10 +210,10 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       });
     } catch (uploadErr) {
       if (!imageSubmitSucceeded) {
-        console.error('Image upload/post failed, falling back to link post', uploadErr);
+        logger.error('Image upload/post failed, falling back to link post', uploadErr);
         const postContent: RedditPostContent = { title: postTitle, url: imageUrl };
         const result = await postOnReddit(token, SUBREDDIT, postContent);
-        console.log('Submitted fallback link post:', result);
+        logger.log('Submitted fallback link post:', result);
 
         await sleep(3000);
         const newestTitle = await getFirstPostTitle(token, SUBREDDIT);
@@ -203,7 +222,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
             `Link post verification also failed: newest post is "${newestTitle}", expected to contain "${title}"`,
           );
         }
-        console.log('Link post verified in /new');
+        logger.log('Link post verified in /new');
 
         const [commentResult, flairResult] = await Promise.all([
           result.name ? tryEnsureComment(token, result.name, pageUrl) : Promise.resolve<CommentResult>('skipped'),
@@ -219,7 +238,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
           source,
         });
       } else {
-        console.error(
+        logger.error(
           'Image post was submitted but verification failed; not posting link to avoid duplicate',
           uploadErr,
         );
@@ -233,7 +252,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       }
     }
   } catch (error) {
-    console.error('Bot run failed', error);
+    logger.error('Bot run failed', error);
     return save({
       lastRunAt: new Date().toISOString(),
       lastRunResult: 'failed',

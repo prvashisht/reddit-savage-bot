@@ -66,22 +66,43 @@ function buildLatestCard(state: RunState): string {
     </div>` : ''}`;
 }
 
+const chevronSvg = `<svg width="9" height="9" viewBox="0 0 9 9" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2.5 1.5L6 4.5L2.5 7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+function buildLogLines(logs: RunState['logs']): string {
+  if (!logs?.length) return '';
+  return logs
+    .map((e) => {
+      const time = e.ts.slice(11, 19);
+      const lvLabel = e.level === 'warn' ? 'WARN' : e.level === 'error' ? 'ERR ' : 'log ';
+      return `<div class="log-line"><span class="log-ts">${esc(time)}</span><span class="log-lv ${e.level}">${lvLabel}</span><span class="log-msg ${e.level}">${esc(e.msg)}</span></div>`;
+    })
+    .join('');
+}
+
 function buildHistoryRows(history: RunState[]): string {
   if (!history.length) return '<p class="empty">No history yet.</p>';
 
   return history
-    .map((entry) => {
+    .map((entry, i) => {
       const resultInfo = RESULT_LABELS[entry.lastRunResult] ?? { label: entry.lastRunResult, color: '#737373' };
       const commentInfo = entry.commentResult ? COMMENT_LABELS[entry.commentResult] : null;
       const sourceTag = entry.source === 'manual' ? ' <span class="source-tag">manual</span>' : '';
+      const logCount = entry.logs?.length ?? 0;
+      const viewerId = `log-viewer-${i}`;
+      const toggleId = `log-toggle-${i}`;
+      const logSection = logCount > 0 ? `
+        <button class="log-toggle" id="${toggleId}" aria-expanded="false" onclick="toggleLog('${viewerId}','${toggleId}')">${chevronSvg} ${logCount} log line${logCount === 1 ? '' : 's'}</button>
+        <div class="log-viewer" id="${viewerId}">${buildLogLines(entry.logs)}</div>` : '';
       return `
-        <div class="history-row">
-          <span class="history-time">${formatDate(entry.lastRunAt)}${sourceTag}</span>
-          <span style="display:flex;gap:.35rem;align-items:center;flex-shrink:0;flex-wrap:wrap">
-            ${badge(resultInfo.label, resultInfo.color)}
-            ${commentInfo ? badge(commentInfo.label, commentInfo.color) : ''}
-            ${entry.flairResult ? flairBadge(entry.flairResult) : ''}
-          </span>
+        <div class="history-entry">
+          <div class="history-row">
+            <span class="history-time">${formatDate(entry.lastRunAt)}${sourceTag}</span>
+            <span style="display:flex;gap:.35rem;align-items:center;flex-shrink:0;flex-wrap:wrap">
+              ${badge(resultInfo.label, resultInfo.color)}
+              ${commentInfo ? badge(commentInfo.label, commentInfo.color) : ''}
+              ${entry.flairResult ? flairBadge(entry.flairResult) : ''}
+            </span>
+          </div>${logSection}
         </div>`;
     })
     .join('');
@@ -165,9 +186,23 @@ export function buildDashboardHtml(
     .run-result{margin-top:.85rem;padding:.6rem .85rem;border-radius:8px;font-size:.82rem;background:#2a2a2a;word-break:break-word;display:none}
     .run-result.visible{display:block}
     .source-tag{display:inline-block;font-size:.65rem;font-weight:600;color:#a78bfa;background:#2e1065;border-radius:4px;padding:.1rem .35rem;margin-left:.35rem;vertical-align:middle}
-    .history-row{display:flex;justify-content:space-between;align-items:center;padding:.55rem 0;border-bottom:1px solid #2a2a2a;gap:.75rem}
-    .history-row:last-child{border-bottom:none}
+    .history-entry{border-bottom:1px solid #2a2a2a}.history-entry:last-child{border-bottom:none}
+    .history-row{display:flex;justify-content:space-between;align-items:center;padding:.55rem 0;gap:.75rem}
     .history-time{font-size:.8rem;color:#a3a3a3;min-width:0;flex:1}
+    .log-toggle{display:inline-flex;align-items:center;gap:.3rem;background:none;border:none;color:#525252;font-size:.72rem;cursor:pointer;padding:.1rem 0 .45rem;line-height:1}
+    .log-toggle:hover{color:#a3a3a3}.log-toggle svg{transition:transform .15s}
+    .log-toggle[aria-expanded="true"] svg{transform:rotate(90deg)}
+    .log-viewer{background:#111;border-radius:6px;padding:.5rem .75rem;font-family:ui-monospace,monospace;font-size:.7rem;max-height:260px;overflow-y:auto;margin-bottom:.45rem;display:none}
+    .log-viewer.open{display:block}
+    .log-line{display:flex;gap:.55rem;padding:.1rem 0;line-height:1.45}
+    .log-ts{color:#404040;flex-shrink:0;user-select:none}.log-lv{flex-shrink:0;font-weight:600;width:2.5rem}
+    .log-lv.warn{color:#ca8a04}.log-lv.error{color:#f87171}.log-lv.log{color:#525252}
+    .log-msg{word-break:break-all;color:#a3a3a3}.log-msg.warn{color:#d97706}.log-msg.error{color:#fca5a5}
+    .run-logs{margin-top:.6rem}
+    .run-log-line{display:flex;gap:.5rem;font-family:ui-monospace,monospace;font-size:.72rem;padding:.1rem 0;line-height:1.45}
+    .run-log-ts{color:#525252;flex-shrink:0}.run-log-lv{flex-shrink:0;font-weight:600;width:2.5rem}
+    .run-log-lv.warn{color:#ca8a04}.run-log-lv.error{color:#f87171}.run-log-lv.log{color:#737373}
+    .run-log-msg{word-break:break-all}.run-log-msg.warn{color:#d97706}.run-log-msg.error{color:#fca5a5}
   </style>
 </head>
 <body>
@@ -247,6 +282,32 @@ export function buildDashboardHtml(
   </div>
 
   <script>
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function toggleLog(viewerId, toggleId) {
+      var viewer = document.getElementById(viewerId);
+      var toggle = document.getElementById(toggleId);
+      var isOpen = viewer.classList.contains('open');
+      viewer.classList.toggle('open', !isOpen);
+      toggle.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+    }
+
+    function buildRunLogs(logs) {
+      if (!logs || !logs.length) return '';
+      var lines = logs.map(function(e) {
+        var time = e.ts.slice(11, 19);
+        var lvLabel = e.level === 'warn' ? 'WARN' : e.level === 'error' ? 'ERR ' : 'log ';
+        return '<div class="run-log-line">' +
+          '<span class="run-log-ts">' + escHtml(time) + '</span>' +
+          '<span class="run-log-lv ' + e.level + '">' + lvLabel + '</span>' +
+          '<span class="run-log-msg ' + e.level + '">' + escHtml(e.msg) + '</span>' +
+          '</div>';
+      }).join('');
+      return '<div class="run-logs" style="border-top:1px solid #2a2a2a;margin-top:.6rem;padding-top:.5rem">' + lines + '</div>';
+    }
+
     function timeAgo(utcSecs) {
       const diff = Math.floor(Date.now() / 1000) - utcSecs;
       if (diff < 60) return diff + 's ago';
@@ -309,14 +370,14 @@ export function buildDashboardHtml(
         const color = RESULT_COLORS[data.lastRunResult] || '#737373';
         const label = RESULT_LABELS[data.lastRunResult] || data.lastRunResult;
 
-        let msg = label;
-        if (data.lastPostedTitle) msg += ' — ' + data.lastPostedTitle;
-        if (data.lastError) msg += '\\nError: ' + data.lastError;
-        if (data.commentResult === 'failed') msg += '\\n⚠ Comment failed to post';
+        let summary = '<strong>' + escHtml(label) + '</strong>';
+        if (data.lastPostedTitle) summary += ' — ' + escHtml(data.lastPostedTitle);
+        if (data.lastError) summary += '<br><span style="color:#f87171">Error: ' + escHtml(data.lastError) + '</span>';
+        if (data.commentResult === 'failed') summary += '<br><span style="color:#f87171">⚠ Comment failed to post</span>';
 
         resultEl.style.borderLeft = '3px solid ' + color;
         resultEl.style.color = color === '#dc2626' ? '#f87171' : '#e5e5e5';
-        resultEl.textContent = msg;
+        resultEl.innerHTML = summary + buildRunLogs(data.logs);
         resultEl.className = 'run-result visible';
 
         // reload page after a short delay so history + status refresh

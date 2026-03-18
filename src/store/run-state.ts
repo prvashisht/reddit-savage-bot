@@ -6,6 +6,9 @@ export type FlairResult =
   | { status: 'skipped'; reason: string }
   | { status: 'failed'; error: string };
 
+export type LogLevel = 'log' | 'warn' | 'error';
+export type LogEntry = { level: LogLevel; msg: string; ts: string };
+
 export type RunState = {
   lastRunAt: string;
   lastRunResult: RunResult;
@@ -15,6 +18,7 @@ export type RunState = {
   commentResult?: CommentResult;
   flairResult?: FlairResult;
   source?: 'scheduled' | 'manual';
+  logs?: LogEntry[];
 };
 
 const HISTORY_KEY = 'run_history';
