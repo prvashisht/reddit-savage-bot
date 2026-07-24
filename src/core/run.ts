@@ -12,8 +12,27 @@ import {
   commentOnPost,
   type RedditPostContent,
 } from '../services/reddit';
-import { detectPartyFromImage } from '../services/openai';
+import { detectPartyFromImage, generateCatchyTitle, toIsoDate, TITLE_BRAND } from '../services/openai';
 import { putRunState, type RunState, type CommentResult, type FlairResult, type LogLevel, type LogEntry } from '../store/run-state';
+
+function envFlagOn(value: string | undefined): boolean {
+  return value === 'true' || value === '1';
+}
+
+/** True if a Reddit title looks like it already covers this Speak Out day. */
+function titleMatchesSpeakout(redditTitle: string, speakoutLocaleTitle: string, isoDate: string | null): boolean {
+  if (redditTitle.includes(speakoutLocaleTitle)) return true;
+  if (isoDate && redditTitle.includes(isoDate)) return true;
+  return false;
+}
+
+function legacyPostTitle(speakoutLocaleTitle: string): string {
+  return `DH Speakout | ${speakoutLocaleTitle}`;
+}
+
+function fallbackIsoTitle(isoDate: string): string {
+  return `${isoDate} | ${TITLE_BRAND}`;
+}
 
 function makeLogger() {
   const entries: LogEntry[] = [];
@@ -145,10 +164,17 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     const { title, imageUrl, pageUrl } = await getLatestSpeakOut();
     const token = await authenticateWithReddit(env);
 
+    let isoDate: string | null = null;
+    try {
+      isoDate = toIsoDate(title);
+    } catch {
+      isoDate = null;
+    }
+
     if (!skipLatestCheck) {
       const recentPosts = await getRecentPosts(token, SUBREDDIT, 1);
       const latestPost = recentPosts[0];
-      if (latestPost?.title.includes(title)) {
+      if (latestPost && titleMatchesSpeakout(latestPost.title, title, isoDate)) {
         logger.log(`Latest speakout posted already: ${title}`);
         const commentResult = await tryEnsureComment(token, latestPost.name, pageUrl);
         return save({
@@ -164,11 +190,32 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       logger.log('[SKIP_LATEST_CHECK] Skipping already-posted check');
     }
 
-    const postTitle = `DH Speakout | ${title}`;
+    const useAiTitle = envFlagOn(env.USE_AI_TITLE);
+    let postTitle = legacyPostTitle(title);
+
+    if (useAiTitle) {
+      if (!env.OPENAI_API_KEY) {
+        logger.warn('[USE_AI_TITLE] OPENAI_API_KEY not set — falling back to legacy title');
+      } else if (!isoDate) {
+        logger.warn('[USE_AI_TITLE] Could not derive ISO date — falling back to legacy title');
+      } else {
+        try {
+          const generated = await generateCatchyTitle(env.OPENAI_API_KEY, imageUrl, { date: isoDate });
+          postTitle = generated.fullTitle;
+          logger.log(
+            `[USE_AI_TITLE] Chose "${generated.phrase}" from [${generated.candidates.join(' | ')}] — ${generated.reason}`,
+          );
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          logger.warn(`[USE_AI_TITLE] Generation failed (${msg}) — falling back to ${fallbackIsoTitle(isoDate)}`);
+          postTitle = fallbackIsoTitle(isoDate);
+        }
+      }
+    }
 
     if (dryRun) {
       logger.log('[DRY_RUN] Would post:', postTitle);
-      return save({ lastRunAt: new Date().toISOString(), lastRunResult: 'dry_run', lastPostedTitle: title, source });
+      return save({ lastRunAt: new Date().toISOString(), lastRunResult: 'dry_run', lastPostedTitle: postTitle, source });
     }
 
     let imageSubmitSucceeded = false;
@@ -184,9 +231,10 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       await sleep(3000);
       const newestPosts = await getRecentPosts(token, SUBREDDIT, 1);
       const newestPost = newestPosts[0];
-      if (!newestPost?.title.includes(title)) {
+      if (!newestPost || !titleMatchesSpeakout(newestPost.title, title, isoDate)) {
         throw new Error(
-          `Image post verification failed: newest post is "${newestPost?.title}", expected to contain "${title}"`,
+          `Image post verification failed: newest post is "${newestPost?.title}", expected to match speakout "${title}"` +
+            (isoDate ? ` or ${isoDate}` : ''),
         );
       }
       logger.log('Image post verified in /new:', newestPost.name);
@@ -217,9 +265,10 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
 
         await sleep(3000);
         const newestTitle = await getFirstPostTitle(token, SUBREDDIT);
-        if (!newestTitle.includes(title)) {
+        if (!titleMatchesSpeakout(newestTitle, title, isoDate)) {
           throw new Error(
-            `Link post verification also failed: newest post is "${newestTitle}", expected to contain "${title}"`,
+            `Link post verification also failed: newest post is "${newestTitle}", expected to match speakout "${title}"` +
+              (isoDate ? ` or ${isoDate}` : ''),
           );
         }
         logger.log('Link post verified in /new');
@@ -281,13 +330,20 @@ export async function ensureCommentOnLatestPost(env: Env): Promise<EnsureComment
     const { title, pageUrl } = await getLatestSpeakOut();
     const token = await authenticateWithReddit(env);
 
+    let isoDate: string | null = null;
+    try {
+      isoDate = toIsoDate(title);
+    } catch {
+      isoDate = null;
+    }
+
     const posts = await getRecentPosts(token, SUBREDDIT, 1);
     const latestPost = posts[0];
     if (!latestPost) {
       return { status: 'failed', error: 'No posts found in subreddit' };
     }
 
-    if (!latestPost.title.includes(title)) {
+    if (!titleMatchesSpeakout(latestPost.title, title, isoDate)) {
       return { status: 'title_mismatch', latestPostTitle: latestPost.title, speakoutTitle: title };
     }
 

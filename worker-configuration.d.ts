@@ -13,6 +13,8 @@ declare namespace Cloudflare {
 		REDDIT_PASSWORD: string;
 		DRY_RUN: string;
 		SKIP_LATEST_CHECK: string;
+		/** When "true"/"1", live posts use AI catchy titles. Off by default. */
+		USE_AI_TITLE: string;
 		DASHBOARD_SECRET: string;
 		OPENAI_API_KEY: string;
 	}
