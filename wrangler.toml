@@ -1,4 +1,4 @@
-name = "reddit-savage-bot"
+name = "reddit_poster_worker"
 main = "src/index.ts"
 compatibility_date = "2025-07-11"
 
@@ -15,3 +15,8 @@ preview_id = "621b589301984fad97f4515c25f4e302"
 
 # Set via: wrangler secret put OPENAI_API_KEY
 # For local dev: add OPENAI_API_KEY="sk-..." to .dev.vars
+#
+# Optional vars (set in dashboard / .dev.vars / wrangler vars):
+#   USE_AI_TITLE=true   — use catchy AI titles on live posts (default: off)
+#   DRY_RUN=true
+#   SKIP_LATEST_CHECK=true

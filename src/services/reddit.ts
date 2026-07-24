@@ -77,7 +77,7 @@ function extractImageUrl(child: any): string | undefined {
   return undefined;
 }
 
-export async function getRecentPosts(token: string, subreddit: string, limit = 5): Promise<RedditPost[]> {
+export async function getRecentPosts(token: string, subreddit: string, limit = 25): Promise<RedditPost[]> {
   const response = await fetch(`https://oauth.reddit.com/r/${subreddit}/new?limit=${limit}`, {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -96,13 +96,15 @@ export async function getRecentPosts(token: string, subreddit: string, limit = 5
     url: child.data.url,
     permalink: `https://reddit.com${child.data.permalink}`,
     createdUtc: child.data.created_utc,
+    imageUrl: extractImageUrl(child),
+    score: child.data.score,
   }));
 }
 
 export async function getTopPosts(
   token: string,
   subreddit: string,
-  limit = 10,
+  limit = 25,
   timeframe: 'day' | 'week' | 'month' | 'year' | 'all' = 'week',
 ): Promise<RedditPost[]> {
   const response = await fetch(

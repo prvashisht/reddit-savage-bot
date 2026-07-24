@@ -1,7 +1,14 @@
 import { getRunState, getRunHistory } from '../store/run-state';
 import { authenticateWithReddit, getRecentPosts, getTopPosts, getFlairTemplates } from '../services/reddit';
 import { runBot, ensureCommentOnLatestPost } from '../core/run';
-import { detectPartyFromImage } from '../services/openai';
+import {
+  detectPartyFromImage,
+  generateCatchyTitle,
+  DEFAULT_EXTRACT_PROMPT,
+  DEFAULT_PHRASE_PROMPT,
+  DEFAULT_CHOOSE_TITLE_PROMPT,
+  toIsoDate,
+} from '../services/openai';
 import { getLatestSpeakOut } from '../services/deccan-herald';
 
 export async function handleApiStatus(env: Env): Promise<Response> {
@@ -20,7 +27,7 @@ export async function handleApiHistory(env: Env): Promise<Response> {
 
 export async function handleApiPosts(env: Env): Promise<Response> {
   const token = await authenticateWithReddit(env);
-  const posts = await getRecentPosts(token, 'DHSavagery');
+  const posts = await getRecentPosts(token, 'DHSavagery', 50);
   return new Response(JSON.stringify(posts), {
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
   });
@@ -30,10 +37,92 @@ export async function handleApiTopPosts(env: Env, timeframe = 'week'): Promise<R
   const valid = ['day', 'week', 'month', 'year', 'all'];
   const t = valid.includes(timeframe) ? (timeframe as 'day' | 'week' | 'month' | 'year' | 'all') : 'week';
   const token = await authenticateWithReddit(env);
-  const posts = await getTopPosts(token, 'DHSavagery', 10, t);
+  const posts = await getTopPosts(token, 'DHSavagery', 50, t);
   return new Response(JSON.stringify(posts), {
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
   });
+}
+
+export async function handleApiDefaultTitlePrompt(): Promise<Response> {
+  return new Response(
+    JSON.stringify({
+      extractPrompt: DEFAULT_EXTRACT_PROMPT,
+      phrasePrompt: DEFAULT_PHRASE_PROMPT,
+      choosePrompt: DEFAULT_CHOOSE_TITLE_PROMPT,
+    }),
+    { headers: { 'Content-Type': 'application/json; charset=utf-8' } },
+  );
+}
+
+export async function handleApiTestTitle(request: Request, env: Env): Promise<Response> {
+  if (!env.OPENAI_API_KEY) {
+    return new Response(JSON.stringify({ error: 'OPENAI_API_KEY not set' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    });
+  }
+
+  let body: {
+    imageUrl?: string;
+    extractPrompt?: string;
+    phrasePrompt?: string;
+    choosePrompt?: string;
+    /** @deprecated */ prompt?: string;
+    date?: string;
+    originalTitle?: string;
+  } = {};
+  try {
+    if (request.headers.get('content-type')?.includes('application/json')) {
+      body = await request.json();
+    }
+  } catch {}
+
+  let imageUrl = body.imageUrl?.trim() ?? '';
+  let speakoutTitle: string | undefined;
+  let speakoutPageUrl: string | undefined;
+  let isoDate = body.date?.trim() || '';
+
+  if (!imageUrl) {
+    const speakout = await getLatestSpeakOut();
+    imageUrl = speakout.imageUrl;
+    speakoutTitle = speakout.title;
+    speakoutPageUrl = speakout.pageUrl;
+    if (!isoDate) {
+      try {
+        isoDate = toIsoDate(speakout.title);
+      } catch {
+        isoDate = toIsoDate();
+      }
+    }
+  } else if (!isoDate) {
+    isoDate = toIsoDate();
+  }
+
+  try {
+    const result = await generateCatchyTitle(env.OPENAI_API_KEY, imageUrl, {
+      extractPrompt: body.extractPrompt || body.prompt,
+      phrasePrompt: body.phrasePrompt,
+      choosePrompt: body.choosePrompt,
+      date: isoDate,
+    });
+    return new Response(
+      JSON.stringify({
+        imageUrl,
+        speakoutTitle,
+        speakoutPageUrl,
+        originalTitle: body.originalTitle,
+        date: isoDate,
+        ...result,
+      }),
+      { headers: { 'Content-Type': 'application/json; charset=utf-8' } },
+    );
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    return new Response(JSON.stringify({ error, imageUrl, speakoutTitle, speakoutPageUrl }), {
+      status: 422,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    });
+  }
 }
 
 export async function handleApiComment(env: Env): Promise<Response> {

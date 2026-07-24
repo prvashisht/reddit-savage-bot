@@ -1,4 +1,9 @@
 import type { RunState, FlairResult } from '../store/run-state';
+import {
+  DEFAULT_EXTRACT_PROMPT,
+  DEFAULT_PHRASE_PROMPT,
+  DEFAULT_CHOOSE_TITLE_PROMPT,
+} from '../services/openai';
 
 function esc(s: string): string {
   return s
@@ -111,12 +116,25 @@ function buildHistoryRows(history: RunState[]): string {
 export function buildDashboardHtml(
   history: RunState[],
   // Set collapsible: false to render right-column sections as plain cards
-  { collapsible = true }: { collapsible?: boolean } = {},
+  {
+    collapsible = true,
+    defaultExtractPrompt = DEFAULT_EXTRACT_PROMPT,
+    defaultPhrasePrompt = DEFAULT_PHRASE_PROMPT,
+    defaultChoosePrompt = DEFAULT_CHOOSE_TITLE_PROMPT,
+  }: {
+    collapsible?: boolean;
+    defaultExtractPrompt?: string;
+    defaultPhrasePrompt?: string;
+    defaultChoosePrompt?: string;
+  } = {},
 ): string {
   const state = history[0] ?? null;
 
   const statusRows = state ? buildLatestCard(state) : '<p class="empty">No runs recorded yet.</p>';
   const historyRows = buildHistoryRows(history);
+  const defaultExtractPromptJson = JSON.stringify(defaultExtractPrompt);
+  const defaultPhrasePromptJson = JSON.stringify(defaultPhrasePrompt);
+  const defaultChoosePromptJson = JSON.stringify(defaultChoosePrompt);
 
   // Helpers for right-column cards — switch between <details> and <div> via the option above
   const rOpen = (open = true) =>
@@ -203,6 +221,25 @@ export function buildDashboardHtml(
     .run-log-ts{color:#525252;flex-shrink:0}.run-log-lv{flex-shrink:0;font-weight:600;width:2.5rem}
     .run-log-lv.warn{color:#ca8a04}.run-log-lv.error{color:#f87171}.run-log-lv.log{color:#737373}
     .run-log-msg{word-break:break-all}.run-log-msg.warn{color:#d97706}.run-log-msg.error{color:#fca5a5}
+    .lab-src{display:flex;gap:.35rem;flex-wrap:wrap;margin-bottom:.75rem}
+    .lab-list{max-height:220px;overflow-y:auto;border:1px solid #2a2a2a;border-radius:8px;background:#111;margin-bottom:.75rem}
+    .lab-item{display:flex;gap:.65rem;padding:.55rem .65rem;border-bottom:1px solid #2a2a2a;cursor:pointer;align-items:flex-start}
+    .lab-item:last-child{border-bottom:none}
+    .lab-item:hover{background:#1f1f1f}
+    .lab-item.selected{background:#292524;outline:1px solid #854d0e}
+    .lab-item-thumb{width:56px;height:42px;object-fit:cover;border-radius:4px;flex-shrink:0;background:#2a2a2a}
+    .lab-item-thumb-ph{width:56px;height:42px;border-radius:4px;flex-shrink:0;background:#2a2a2a;display:flex;align-items:center;justify-content:center;font-size:.9rem;color:#525252}
+    .lab-item-title{font-size:.78rem;line-height:1.35;color:#e5e5e5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .lab-item-meta{font-size:.68rem;color:#737373;margin-top:.2rem}
+    .lab-preview{display:none;gap:.85rem;align-items:flex-start;margin-bottom:.75rem;padding:.65rem;border:1px solid #2a2a2a;border-radius:8px;background:#141414}
+    .lab-preview.visible{display:flex}
+    .lab-preview-img{width:120px;height:90px;object-fit:cover;border-radius:6px;flex-shrink:0;background:#2a2a2a}
+    .lab-preview-body{flex:1;min-width:0;font-size:.8rem}
+    .lab-preview-label{font-size:.68rem;color:#737373;text-transform:uppercase;letter-spacing:.04em;margin-bottom:.25rem}
+    .lab-preview-title{color:#e5e5e5;line-height:1.35;word-break:break-word}
+    .lab-prompt{width:100%;min-height:110px;background:#111;border:1px solid #3a3a3a;color:#e5e5e5;border-radius:8px;padding:.55rem .65rem;font-size:.75rem;font-family:ui-monospace,monospace;line-height:1.4;resize:vertical;outline:none;margin-bottom:.65rem}
+    .lab-prompt:focus{border-color:#525252}
+    .lab-actions{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem}
   </style>
 </head>
 <body>
@@ -237,6 +274,39 @@ export function buildDashboardHtml(
       <button class="run-btn" id="flair-test-btn" style="background:#854d0e;flex-shrink:0" onclick="triggerTestFlair()">Detect</button>
     </div>
     <div class="run-result" id="flair-test-result"></div>
+  </div>
+
+  <div class="card">
+    <h2>Title lab</h2>
+    <p style="font-size:.82rem;color:#737373;margin-bottom:1rem">Call 1: vision extract (temp 0, detail auto). Call 2: text <code style="color:#a3a3a3">n=3</code> phrases (0.9). Call 3: pick best + party search (0.1). Nothing is posted.</p>
+    <div class="lab-src" id="lab-src">
+      <button class="tf-btn active" data-lab="speakout" onclick="setLabSource('speakout')">Today</button>
+      <button class="tf-btn" data-lab="recent" onclick="setLabSource('recent')">Recent</button>
+      <button class="tf-btn" data-lab="week" onclick="setLabSource('week')">Top week</button>
+      <button class="tf-btn" data-lab="month" onclick="setLabSource('month')">Month</button>
+      <button class="tf-btn" data-lab="year" onclick="setLabSource('year')">Year</button>
+      <button class="tf-btn" data-lab="all" onclick="setLabSource('all')">All time</button>
+    </div>
+    <div class="lab-list" id="lab-list"><p class="empty">Select Today to use the latest Speak Out, or pick a post list.</p></div>
+    <div class="lab-preview" id="lab-preview">
+      <img class="lab-preview-img" id="lab-preview-img" alt="" />
+      <div class="lab-preview-body">
+        <div class="lab-preview-label">Current / original title</div>
+        <div class="lab-preview-title" id="lab-preview-title"></div>
+        <div class="lab-item-meta" id="lab-preview-meta" style="margin-top:.35rem"></div>
+      </div>
+    </div>
+    <div class="lab-preview-label" style="margin-bottom:.35rem">Call 1 · Extract <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#525252">(vision)</span></div>
+    <textarea class="lab-prompt" id="lab-extract-prompt" spellcheck="false"></textarea>
+    <div class="lab-preview-label" style="margin-bottom:.35rem">Call 2 · Phrases <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#525252">(text n=3)</span></div>
+    <textarea class="lab-prompt" id="lab-phrase-prompt" spellcheck="false" style="min-height:90px"></textarea>
+    <div class="lab-preview-label" style="margin-bottom:.35rem">Call 3 · Choose + party <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#525252">(text / search)</span></div>
+    <textarea class="lab-prompt" id="lab-choose-prompt" spellcheck="false" style="min-height:90px"></textarea>
+    <div class="lab-actions">
+      <button class="run-btn" id="lab-gen-btn" style="background:#7c3aed" onclick="triggerTestTitle()">Generate</button>
+      <button class="refresh-btn" type="button" onclick="resetLabPrompts()">Reset prompts</button>
+    </div>
+    <div class="run-result" id="lab-result"></div>
   </div>
 
   <div class="card">
@@ -540,7 +610,279 @@ export function buildDashboardHtml(
       });
     });
 
+    // --- Title lab ---
+    var DEFAULT_EXTRACT_PROMPT = ${defaultExtractPromptJson};
+    var DEFAULT_PHRASE_PROMPT = ${defaultPhrasePromptJson};
+    var DEFAULT_CHOOSE_PROMPT = ${defaultChoosePromptJson};
+    var LAB_EXTRACT_KEY = 'titleLabExtractPrompt';
+    var LAB_PHRASE_PROMPT_KEY = 'titleLabPhrasePromptV2';
+    var LAB_CHOOSE_PROMPT_KEY = 'titleLabChoosePrompt';
+    var labSource = 'speakout';
+    var labSelection = { mode: 'speakout', imageUrl: '', originalTitle: '', date: '', meta: '' };
+
+    function persistLabPrompt(key, value) {
+      try { localStorage.setItem(key, value); } catch (e) {}
+    }
+
+    function readLabPrompt(key, fallback) {
+      try {
+        var saved = localStorage.getItem(key);
+        if (saved && saved.trim()) return saved;
+      } catch (e) {}
+      return fallback;
+    }
+
+    function initLabPrompt() {
+      var extractTa = document.getElementById('lab-extract-prompt');
+      var phraseTa = document.getElementById('lab-phrase-prompt');
+      var chooseTa = document.getElementById('lab-choose-prompt');
+      extractTa.value = readLabPrompt(LAB_EXTRACT_KEY, DEFAULT_EXTRACT_PROMPT);
+      phraseTa.value = readLabPrompt(LAB_PHRASE_PROMPT_KEY, DEFAULT_PHRASE_PROMPT);
+      chooseTa.value = readLabPrompt(LAB_CHOOSE_PROMPT_KEY, DEFAULT_CHOOSE_PROMPT);
+      function bind(ta, key) {
+        ta.addEventListener('change', function() { persistLabPrompt(key, ta.value); });
+        ta.addEventListener('blur', function() { persistLabPrompt(key, ta.value); });
+      }
+      bind(extractTa, LAB_EXTRACT_KEY);
+      bind(phraseTa, LAB_PHRASE_PROMPT_KEY);
+      bind(chooseTa, LAB_CHOOSE_PROMPT_KEY);
+    }
+
+    function resetLabPrompts() {
+      var extractTa = document.getElementById('lab-extract-prompt');
+      var phraseTa = document.getElementById('lab-phrase-prompt');
+      var chooseTa = document.getElementById('lab-choose-prompt');
+      extractTa.value = DEFAULT_EXTRACT_PROMPT;
+      phraseTa.value = DEFAULT_PHRASE_PROMPT;
+      chooseTa.value = DEFAULT_CHOOSE_PROMPT;
+      persistLabPrompt(LAB_EXTRACT_KEY, DEFAULT_EXTRACT_PROMPT);
+      persistLabPrompt(LAB_PHRASE_PROMPT_KEY, DEFAULT_PHRASE_PROMPT);
+      persistLabPrompt(LAB_CHOOSE_PROMPT_KEY, DEFAULT_CHOOSE_PROMPT);
+    }
+
+    function setLabSource(src) {
+      labSource = src;
+      document.querySelectorAll('#lab-src .tf-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.lab === src);
+      });
+      if (src === 'speakout') {
+        selectSpeakout();
+      } else if (src === 'recent') {
+        loadLabPosts('/api/posts', 'Recent posts');
+      } else {
+        loadLabPosts('/api/top-posts?t=' + src, 'Top · ' + src);
+      }
+    }
+
+    function isoFromCreatedUtc(createdUtc) {
+      if (!createdUtc) return '';
+      return new Date(createdUtc * 1000).toISOString().slice(0, 10);
+    }
+
+    function renderLabPreview() {
+      var preview = document.getElementById('lab-preview');
+      var img = document.getElementById('lab-preview-img');
+      var title = document.getElementById('lab-preview-title');
+      var meta = document.getElementById('lab-preview-meta');
+      if (!labSelection.imageUrl && labSelection.mode !== 'speakout') {
+        preview.classList.remove('visible');
+        return;
+      }
+      if (labSelection.imageUrl) {
+        img.src = labSelection.imageUrl;
+        img.style.display = '';
+      } else {
+        img.removeAttribute('src');
+        img.style.display = 'none';
+      }
+      title.textContent = labSelection.originalTitle || "(today's Speak Out — title loaded on generate)";
+      meta.textContent = labSelection.meta || '';
+      preview.classList.add('visible');
+    }
+
+    function selectSpeakout() {
+      labSelection = {
+        mode: 'speakout',
+        imageUrl: '',
+        originalTitle: "Today's Speak Out cartoon",
+        date: '',
+        meta: 'Image fetched from Deccan Herald on generate',
+      };
+      document.getElementById('lab-list').innerHTML =
+        '<p class="empty" style="padding:.75rem">Using today\\u2019s Speak Out. Click Generate to run vision + compose title.</p>';
+      renderLabPreview();
+    }
+
+    function selectLabPost(post) {
+      if (!post.imageUrl) {
+        alert('This post has no usable image URL for vision.');
+        return;
+      }
+      labSelection = {
+        mode: 'post',
+        imageUrl: post.imageUrl,
+        originalTitle: post.title || '',
+        date: isoFromCreatedUtc(post.createdUtc),
+        meta: (post.permalink ? 'Reddit post · ' : '') + (post.createdUtc ? timeAgo(post.createdUtc) : ''),
+      };
+      document.querySelectorAll('#lab-list .lab-item').forEach(function(el) {
+        el.classList.toggle('selected', el.dataset.name === post.name);
+      });
+      renderLabPreview();
+    }
+
+    async function loadLabPosts(url, label) {
+      var list = document.getElementById('lab-list');
+      list.innerHTML = '<p class="empty">Loading ' + escHtml(label) + '…</p>';
+      try {
+        var res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var posts = await res.json();
+        var withImages = posts.filter(function(p) { return !!p.imageUrl; });
+        window.__labPosts = withImages;
+        if (!withImages.length) {
+          list.innerHTML = '<p class="empty">No posts with images found.</p>';
+          return;
+        }
+        list.innerHTML = withImages.map(function(p, i) {
+          var safeTitle = escHtml(p.title);
+          var thumb = p.imageUrl
+            ? '<img class="lab-item-thumb" src="' + escHtml(p.imageUrl) + '" alt="" loading="lazy">'
+            : '<div class="lab-item-thumb-ph">—</div>';
+          return '<div class="lab-item" data-name="' + escHtml(p.name) + '" onclick="selectLabPostByIndex(' + i + ')">' +
+            thumb +
+            '<div style="min-width:0;flex:1">' +
+              '<div class="lab-item-title">' + safeTitle + '</div>' +
+              '<div class="lab-item-meta">' + timeAgo(p.createdUtc) + (p.score != null ? ' · ▲ ' + p.score : '') + '</div>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+      } catch (e) {
+        list.innerHTML = '<p class="empty error">Failed to load: ' + escHtml(e.message) + '</p>';
+      }
+    }
+
+    function selectLabPostByIndex(i) {
+      var posts = window.__labPosts || [];
+      if (!posts[i]) return;
+      selectLabPost(posts[i]);
+    }
+
+    async function triggerTestTitle() {
+      var btn = document.getElementById('lab-gen-btn');
+      var resultEl = document.getElementById('lab-result');
+      var extractPrompt = document.getElementById('lab-extract-prompt').value;
+      var phrasePrompt = document.getElementById('lab-phrase-prompt').value;
+      var choosePrompt = document.getElementById('lab-choose-prompt').value;
+      btn.disabled = true;
+      btn.textContent = 'Generating…';
+      resultEl.className = 'run-result';
+
+      try {
+        persistLabPrompt(LAB_EXTRACT_KEY, extractPrompt);
+        persistLabPrompt(LAB_PHRASE_PROMPT_KEY, phrasePrompt);
+        persistLabPrompt(LAB_CHOOSE_PROMPT_KEY, choosePrompt);
+        var body = {
+          extractPrompt: extractPrompt,
+          phrasePrompt: phrasePrompt,
+          choosePrompt: choosePrompt,
+        };
+        if (labSelection.mode === 'post') {
+          if (!labSelection.imageUrl) throw new Error('Select a post with an image first');
+          body.imageUrl = labSelection.imageUrl;
+          body.originalTitle = labSelection.originalTitle;
+          if (labSelection.date) body.date = labSelection.date;
+        }
+
+        var res = await fetch('/api/test-title', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        var data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Request failed');
+
+        if (data.imageUrl && labSelection.mode === 'speakout') {
+          labSelection.imageUrl = data.imageUrl;
+          if (data.speakoutTitle) labSelection.originalTitle = data.speakoutTitle;
+          labSelection.meta = data.speakoutPageUrl || labSelection.meta;
+          renderLabPreview();
+        }
+
+        var ex = data.extract || {};
+        var aboutStr = Array.isArray(ex.about) && ex.about.length
+          ? ex.about.map(function(p) { return (p.name || '') + ' (' + (p.kind || 'unknown') + ')'; }).join(', ')
+          : '—';
+        var extractHtml =
+          '<div style="margin-top:.55rem;padding-top:.55rem;border-top:1px solid #2a2a2a">' +
+            '<div class="lab-preview-label">Call 1 · Extract</div>' +
+            '<div style="font-size:.78rem;color:#a3a3a3;line-height:1.45">' +
+              '<div>speaker: <span style="color:#e5e5e5">' + escHtml((ex.speaker && ex.speaker.name) || '—') + '</span>' +
+              (ex.speaker ? ' (' + escHtml(ex.speaker.kind || 'unknown') + ')' : '') + '</div>' +
+              '<div>about: ' + escHtml(aboutStr) + '</div>' +
+              (ex.statement ? '<div>statement: ' + escHtml(ex.statement) + '</div>' : '') +
+              (ex.satire ? '<div>satire: ' + escHtml(ex.satire) + '</div>' : '') +
+              (ex.satireAuthor ? '<div>satire author: ' + escHtml(ex.satireAuthor) + '</div>' : '') +
+            '</div>' +
+          '</div>';
+
+        var candidates = Array.isArray(data.candidates) ? data.candidates : [];
+        var candidatesHtml = candidates.length
+          ? '<div style="margin-top:.55rem;padding-top:.55rem;border-top:1px solid #2a2a2a">' +
+              '<div class="lab-preview-label">Call 2 · Phrases</div>' +
+              candidates.map(function(c, i) {
+                var chosen = i === data.chosenIndex;
+                return '<div style="font-size:.8rem;padding:.2rem 0;color:' + (chosen ? '#e5e5e5' : '#737373') + '">' +
+                  (chosen ? '<strong>✓ ' : '') + (i + 1) + '. ' + escHtml(c) + (chosen ? '</strong>' : '') +
+                  '</div>';
+              }).join('') +
+            '</div>'
+          : '';
+
+        var partyHtml =
+          '<div style="margin-top:.55rem;padding-top:.55rem;border-top:1px solid #2a2a2a">' +
+            '<div class="lab-preview-label">Call 3 · Party (speaker web search)</div>' +
+            '<div style="font-size:.85rem;font-weight:600;color:' + (data.party ? '#86efac' : '#a3a3a3') + '">' +
+              escHtml(data.party || 'null') +
+            '</div>' +
+            (data.partyReason ? '<div style="font-size:.75rem;color:#737373;margin-top:.2rem">' + escHtml(data.partyReason) + '</div>' : '') +
+          '</div>';
+
+        var compare = labSelection.originalTitle
+          ? '<div style="margin-top:.55rem;padding-top:.55rem;border-top:1px solid #2a2a2a">' +
+              '<div class="lab-preview-label">Original Reddit title</div>' +
+              '<div style="color:#a3a3a3">' + escHtml(labSelection.originalTitle) + '</div>' +
+            '</div>'
+          : '';
+
+        resultEl.style.borderLeft = '3px solid #16a34a';
+        resultEl.style.color = '#e5e5e5';
+        resultEl.innerHTML =
+          '<div class="lab-preview-label">Winner</div>' +
+          '<div style="font-size:.95rem;font-weight:600;margin-bottom:.25rem">' + escHtml(data.phrase) + '</div>' +
+          (data.reason ? '<div style="font-size:.75rem;color:#a3a3a3;margin-bottom:.45rem">' + escHtml(data.reason) + '</div>' : '') +
+          '<div class="lab-preview-label">Full Reddit title</div>' +
+          '<div style="font-family:ui-monospace,monospace;font-size:.78rem;line-height:1.4">' + escHtml(data.fullTitle) + '</div>' +
+          '<div style="margin-top:.45rem;font-size:.7rem;color:#737373">model: ' + escHtml(data.model) + ' · date: ' + escHtml(data.date || '') + ' · 3 AI calls</div>' +
+          extractHtml +
+          candidatesHtml +
+          partyHtml +
+          compare;
+        resultEl.className = 'run-result visible';
+      } catch (e) {
+        resultEl.style.borderLeft = '3px solid #dc2626';
+        resultEl.style.color = '#f87171';
+        resultEl.textContent = 'Error: ' + e.message;
+        resultEl.className = 'run-result visible';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Generate';
+      }
+    }
+
     console.log('[dashboard] script loaded, kicking off loadPosts + loadTopPosts');
+    initLabPrompt();
+    selectSpeakout();
     loadPosts();
     loadTopPosts('week');
   </script>

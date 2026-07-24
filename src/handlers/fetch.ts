@@ -1,5 +1,15 @@
 import { handleDashboard } from '../routes/dashboard';
-import { handleApiStatus, handleApiHistory, handleApiPosts, handleApiTopPosts, handleApiRun, handleApiComment, handleApiTestFlair } from '../routes/api';
+import {
+  handleApiStatus,
+  handleApiHistory,
+  handleApiPosts,
+  handleApiTopPosts,
+  handleApiRun,
+  handleApiComment,
+  handleApiTestFlair,
+  handleApiTestTitle,
+  handleApiDefaultTitlePrompt,
+} from '../routes/api';
 import {
   handleLoginPage,
   handleLoginSubmit,
@@ -84,6 +94,16 @@ export async function handleFetch(request: Request, env: Env, _ctx: ExecutionCon
   if (pathname === '/api/test-flair' && method === 'POST') {
     if (!isAuthorized(request, env)) return unauthorized();
     return handleApiTestFlair(request, env);
+  }
+
+  if (pathname === '/api/default-title-prompt' && method === 'GET') {
+    if (!isAuthorized(request, env)) return unauthorized();
+    return handleApiDefaultTitlePrompt();
+  }
+
+  if (pathname === '/api/test-title' && method === 'POST') {
+    if (!isAuthorized(request, env)) return unauthorized();
+    return handleApiTestTitle(request, env);
   }
 
   return new Response('Not Found', { status: 404 });
