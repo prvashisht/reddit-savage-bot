@@ -42,8 +42,10 @@ describe('parseIsoDate / toIsoDate / resolveChosenIndex', () => {
     expect(parseIsoDate('07-24-2026')).toBeNull();
   });
 
-  it('converts Date to ISO', () => {
+  it('converts Date and locale speakout titles to Asia/Kolkata calendar day', () => {
     expect(toIsoDate(new Date('2026-07-24T12:00:00Z'))).toBe('2026-07-24');
+    // Locale midnight must not slip a day via UTC toISOString()
+    expect(toIsoDate('Friday, July 24, 2026')).toBe('2026-07-24');
   });
 
   it('resolves chosen indices', () => {

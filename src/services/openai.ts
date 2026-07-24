@@ -288,13 +288,22 @@ export function parseIsoDate(value: string): string | null {
   return `${m[1]}-${m[2]}-${m[3]}`;
 }
 
-/** Convert a Date or parseable date string to YYYY-MM-DD (UTC calendar day). */
+/** Convert a Date or parseable date string to YYYY-MM-DD in Asia/Kolkata.
+ *  Avoids the classic UTC off-by-one when locale strings like
+ *  "Friday, July 24, 2026" are parsed as local midnight and then sliced via toISOString().
+ */
 export function toIsoDate(input: Date | string = new Date()): string {
   const d = typeof input === 'string' ? new Date(input) : input;
   if (Number.isNaN(d.getTime())) {
     throw new Error(`Invalid date: ${String(input)}`);
   }
-  return d.toISOString().slice(0, 10);
+  // en-CA yields YYYY-MM-DD
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
 }
 
 /** Resolve a 0-based chosen index from the judge response against candidates. */
