@@ -1,6 +1,7 @@
 name = "reddit_poster_worker"
 main = "src/index.ts"
 compatibility_date = "2025-07-11"
+preview_urls = true
 
 [triggers]
 crons = ["0 * * * *"]
