@@ -88,11 +88,13 @@ export async function handleApiTestTitle(request: Request, env: Env): Promise<Re
     speakoutTitle = speakout.title;
     speakoutPageUrl = speakout.pageUrl;
     if (!isoDate) {
-      try {
-        isoDate = toIsoDate(speakout.title);
-      } catch {
-        isoDate = toIsoDate();
-      }
+      isoDate = speakout.isoDate || (() => {
+        try {
+          return toIsoDate(speakout.title);
+        } catch {
+          return toIsoDate();
+        }
+      })();
     }
   } else if (!isoDate) {
     isoDate = toIsoDate();

@@ -161,21 +161,26 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
   };
 
   try {
-    const { title, imageUrl, pageUrl } = await getLatestSpeakOut();
+    const { title, imageUrl, pageUrl, isoDate: slugIso } = await getLatestSpeakOut();
     const token = await authenticateWithReddit(env);
 
-    let isoDate: string | null = null;
-    try {
-      isoDate = toIsoDate(title);
-    } catch {
-      isoDate = null;
+    // Prefer URL-slug ISO from DH; fall back to parsing the locale title.
+    let isoDate: string | null = slugIso ?? null;
+    if (!isoDate) {
+      try {
+        isoDate = toIsoDate(title);
+      } catch {
+        isoDate = null;
+      }
     }
 
     if (!skipLatestCheck) {
       const recentPosts = await getRecentPosts(token, SUBREDDIT, 1);
       const latestPost = recentPosts[0];
       if (latestPost && titleMatchesSpeakout(latestPost.title, title, isoDate)) {
-        logger.log(`Latest speakout posted already: ${title}`);
+        logger.log(
+          `Latest speakout posted already: DH "${title}" (${isoDate ?? 'no-iso'}) matches Reddit "${latestPost.title}"`,
+        );
         const commentResult = await tryEnsureComment(token, latestPost.name, pageUrl);
         return save({
           lastRunAt: new Date().toISOString(),
@@ -327,14 +332,16 @@ export async function ensureCommentOnLatestPost(env: Env): Promise<EnsureComment
   };
 
   try {
-    const { title, pageUrl } = await getLatestSpeakOut();
+    const { title, pageUrl, isoDate: slugIso } = await getLatestSpeakOut();
     const token = await authenticateWithReddit(env);
 
-    let isoDate: string | null = null;
-    try {
-      isoDate = toIsoDate(title);
-    } catch {
-      isoDate = null;
+    let isoDate: string | null = slugIso ?? null;
+    if (!isoDate) {
+      try {
+        isoDate = toIsoDate(title);
+      } catch {
+        isoDate = null;
+      }
     }
 
     const posts = await getRecentPosts(token, SUBREDDIT, 1);
