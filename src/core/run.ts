@@ -25,7 +25,11 @@ function envFlagOn(value: string | undefined): boolean {
   return value === 'true' || value === '1';
 }
 
-/** Precomputed flair from the AI title pipeline. `undefined` = run vision flair; `null` = skip (no party). */
+/** Precomputed flair from the AI title pipeline.
+ *  - object: reuse this party (skip vision flair)
+ *  - null: intentionally no flair (non-politician / no speaker)
+ *  - undefined: run dedicated detectPartyFromImage (legacy path, title failed, or politician party unresolved)
+ */
 type TitleFlairHint = { party: KnownParty; person: string } | null | undefined;
 
 /** True if a Reddit title looks like it already covers this Speak Out day. */
@@ -149,11 +153,11 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     imageUrl: string,
     titleFlair?: TitleFlairHint,
   ): Promise<FlairResult> => {
-    // When USE_AI_TITLE already resolved party (or decided there is none), skip the
-    // separate vision + web-search flair round-trip.
+    // When USE_AI_TITLE already resolved a party, reuse it. null means skip (non-politician).
+    // undefined means run the dedicated vision flair path.
     if (titleFlair === null) {
-      logger.log('Flair: skipped — AI title pipeline returned no party for speaker');
-      return { status: 'skipped', reason: 'No party from AI title pipeline' };
+      logger.log('Flair: skipped — speaker is not a flairable politician from AI title extract');
+      return { status: 'skipped', reason: 'Non-politician speaker from AI title pipeline' };
     }
 
     try {
@@ -242,12 +246,24 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
         try {
           const generated = await generateCatchyTitle(env.OPENAI_API_KEY, imageUrl, { date: isoDate });
           postTitle = generated.fullTitle;
-          titleFlair = generated.party
-            ? {
-                party: generated.party,
-                person: generated.extract.speaker?.name?.trim() || 'unknown',
-              }
-            : null;
+          const speaker = generated.extract.speaker;
+          const isPolitician = speaker?.kind === 'politician' && !!speaker.name?.trim();
+
+          if (generated.party) {
+            titleFlair = {
+              party: generated.party,
+              person: speaker?.name?.trim() || 'unknown',
+            };
+          } else if (isPolitician) {
+            // Politician lookup returned null/unrecognized — don't skip flair; fall back to vision path.
+            titleFlair = undefined;
+            logger.warn(
+              `[USE_AI_TITLE] Party unresolved for politician "${speaker!.name}" (${generated.partyReason ?? 'n/a'}) — will use flair vision fallback`,
+            );
+          } else {
+            titleFlair = null;
+          }
+
           logger.log(
             `[USE_AI_TITLE] Chose "${generated.phrase}" from [${generated.candidates.join(' | ')}] — ${generated.reason}` +
               (generated.party
@@ -269,7 +285,9 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       if (titleFlair) {
         logger.log(`[DRY_RUN] Would flair from title pipeline: ${titleFlair.party} (${titleFlair.person})`);
       } else if (titleFlair === null) {
-        logger.log('[DRY_RUN] Would skip flair — no party from AI title pipeline');
+        logger.log('[DRY_RUN] Would skip flair — non-politician speaker from AI title extract');
+      } else if (useAiTitle) {
+        logger.log('[DRY_RUN] Would flair via vision fallback (title party unresolved or title failed)');
       }
       return save({ lastRunAt: new Date().toISOString(), lastRunResult: 'dry_run', lastPostedTitle: postTitle, source });
     }
