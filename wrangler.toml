@@ -14,10 +14,13 @@ binding = "REDDIT_POSTER_STATE"
 id = "09fb5d33d2394160b3af020895afabdd"
 preview_id = "621b589301984fad97f4515c25f4e302"
 
-# Set via: wrangler secret put OPENAI_API_KEY
-# For local dev: add OPENAI_API_KEY="sk-..." to .dev.vars
-#
-# Optional vars (set in dashboard / .dev.vars / wrangler vars):
-#   USE_AI_TITLE=true   — use catchy AI titles on live posts (default: off)
-#   DRY_RUN=true
-#   SKIP_LATEST_CHECK=true
+# Secrets (persist across deploys; set via dashboard or `wrangler secret put`):
+#   DASHBOARD_SECRET, OPENAI_API_KEY, REDDIT_APP_ID, REDDIT_APP_SECRET,
+#   REDDIT_USERNAME, REDDIT_PASSWORD
+# For local: put those in .dev.vars (and override flags there if needed).
+
+# Plaintext vars are replaced on every `wrangler deploy` from this block.
+[vars]
+USE_AI_TITLE = "true"
+DRY_RUN = "false"
+SKIP_LATEST_CHECK = "false"

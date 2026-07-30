@@ -12,12 +12,25 @@ import {
   commentOnPost,
   type RedditPostContent,
 } from '../services/reddit';
-import { detectPartyFromImage, generateCatchyTitle, toIsoDate, TITLE_BRAND } from '../services/openai';
+import {
+  detectPartyFromImage,
+  generateCatchyTitle,
+  toIsoDate,
+  TITLE_BRAND,
+  type KnownParty,
+} from '../services/openai';
 import { putRunState, type RunState, type CommentResult, type FlairResult, type LogLevel, type LogEntry } from '../store/run-state';
 
 function envFlagOn(value: string | undefined): boolean {
   return value === 'true' || value === '1';
 }
+
+/** Precomputed flair from the AI title pipeline.
+ *  - object: reuse this party (skip vision flair)
+ *  - null: intentionally no flair (non-politician / no speaker)
+ *  - undefined: run dedicated detectPartyFromImage (legacy path, title failed, or politician party unresolved)
+ */
+type TitleFlairHint = { party: KnownParty; person: string } | null | undefined;
 
 /** True if a Reddit title looks like it already covers this Speak Out day. */
 function titleMatchesSpeakout(redditTitle: string, speakoutLocaleTitle: string, isoDate: string | null): boolean {
@@ -134,25 +147,49 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     return tryComment(token, postName, sourceUrl, { skipDelay: true });
   };
 
-  const tryFlair = async (token: string, postName: string, imageUrl: string): Promise<FlairResult> => {
-    if (!env.OPENAI_API_KEY) {
-      return { status: 'skipped', reason: 'OPENAI_API_KEY not set' };
+  const tryFlair = async (
+    token: string,
+    postName: string,
+    imageUrl: string,
+    titleFlair?: TitleFlairHint,
+  ): Promise<FlairResult> => {
+    // When USE_AI_TITLE already resolved a party, reuse it. null means skip (non-politician).
+    // undefined means run the dedicated vision flair path.
+    if (titleFlair === null) {
+      logger.log('Flair: skipped — speaker is not a flairable politician from AI title extract');
+      return { status: 'skipped', reason: 'Non-politician speaker from AI title pipeline' };
     }
+
     try {
-      const detection = await detectPartyFromImage(env.OPENAI_API_KEY, imageUrl);
-      if (!detection.party) {
-        logger.log('Flair: could not identify party —', detection.reason);
-        return { status: 'skipped', reason: detection.reason };
+      let party: string;
+      let person: string;
+
+      if (titleFlair) {
+        party = titleFlair.party;
+        person = titleFlair.person;
+        logger.log(`Flair: reusing party from AI title pipeline — ${party} (${person})`);
+      } else {
+        if (!env.OPENAI_API_KEY) {
+          return { status: 'skipped', reason: 'OPENAI_API_KEY not set' };
+        }
+        const detection = await detectPartyFromImage(env.OPENAI_API_KEY, imageUrl);
+        if (!detection.party) {
+          logger.log('Flair: could not identify party —', detection.reason);
+          return { status: 'skipped', reason: detection.reason };
+        }
+        party = detection.party;
+        person = detection.person;
       }
+
       const templates = await getFlairTemplates(token, SUBREDDIT);
-      const template = templates.find((t) => t.text.trim().toUpperCase() === detection.party!.toUpperCase());
+      const template = templates.find((t) => t.text.trim().toUpperCase() === party.toUpperCase());
       if (!template) {
-        logger.log(`Flair: no template found for party "${detection.party}"`);
-        return { status: 'skipped', reason: `No flair template for "${detection.party}"` };
+        logger.log(`Flair: no template found for party "${party}"`);
+        return { status: 'skipped', reason: `No flair template for "${party}"` };
       }
       await setPostFlair(token, SUBREDDIT, postName, template.id);
-      logger.log(`Flair set: ${detection.party} (${detection.person})`);
-      return { status: 'set', party: detection.party, person: detection.person };
+      logger.log(`Flair set: ${party} (${person})`);
+      return { status: 'set', party, person };
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
       logger.error('Failed to set flair (non-fatal):', error);
@@ -197,6 +234,8 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
 
     const useAiTitle = envFlagOn(env.USE_AI_TITLE);
     let postTitle = legacyPostTitle(title);
+    // undefined → legacy vision flair; null/object → reuse (or skip) title-pipeline party
+    let titleFlair: TitleFlairHint = undefined;
 
     if (useAiTitle) {
       if (!env.OPENAI_API_KEY) {
@@ -207,19 +246,49 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
         try {
           const generated = await generateCatchyTitle(env.OPENAI_API_KEY, imageUrl, { date: isoDate });
           postTitle = generated.fullTitle;
+          const speaker = generated.extract.speaker;
+          const isPolitician = speaker?.kind === 'politician' && !!speaker.name?.trim();
+
+          if (generated.party) {
+            titleFlair = {
+              party: generated.party,
+              person: speaker?.name?.trim() || 'unknown',
+            };
+          } else if (isPolitician) {
+            // Politician lookup returned null/unrecognized — don't skip flair; fall back to vision path.
+            titleFlair = undefined;
+            logger.warn(
+              `[USE_AI_TITLE] Party unresolved for politician "${speaker!.name}" (${generated.partyReason ?? 'n/a'}) — will use flair vision fallback`,
+            );
+          } else {
+            titleFlair = null;
+          }
+
           logger.log(
-            `[USE_AI_TITLE] Chose "${generated.phrase}" from [${generated.candidates.join(' | ')}] — ${generated.reason}`,
+            `[USE_AI_TITLE] Chose "${generated.phrase}" from [${generated.candidates.join(' | ')}] — ${generated.reason}` +
+              (generated.party
+                ? ` · party ${generated.party}`
+                : ` · party null (${generated.partyReason ?? 'n/a'})`),
           );
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           logger.warn(`[USE_AI_TITLE] Generation failed (${msg}) — falling back to ${fallbackIsoTitle(isoDate)}`);
           postTitle = fallbackIsoTitle(isoDate);
+          // Title pipeline failed before party — fall back to dedicated flair vision call.
+          titleFlair = undefined;
         }
       }
     }
 
     if (dryRun) {
       logger.log('[DRY_RUN] Would post:', postTitle);
+      if (titleFlair) {
+        logger.log(`[DRY_RUN] Would flair from title pipeline: ${titleFlair.party} (${titleFlair.person})`);
+      } else if (titleFlair === null) {
+        logger.log('[DRY_RUN] Would skip flair — non-politician speaker from AI title extract');
+      } else if (useAiTitle) {
+        logger.log('[DRY_RUN] Would flair via vision fallback (title party unresolved or title failed)');
+      }
       return save({ lastRunAt: new Date().toISOString(), lastRunResult: 'dry_run', lastPostedTitle: postTitle, source });
     }
 
@@ -250,7 +319,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       const postUrl = result.url ?? newestPost.url ?? newestPost.permalink;
       const [commentResult, flairResult] = await Promise.all([
         tryEnsureComment(token, postName, pageUrl),
-        tryFlair(token, postName, imageUrl),
+        tryFlair(token, postName, imageUrl, titleFlair),
       ]);
       return save({
         lastRunAt: new Date().toISOString(),
@@ -280,7 +349,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
 
         const [commentResult, flairResult] = await Promise.all([
           result.name ? tryEnsureComment(token, result.name, pageUrl) : Promise.resolve<CommentResult>('skipped'),
-          tryFlair(token, result.name ?? '', imageUrl),
+          tryFlair(token, result.name ?? '', imageUrl, titleFlair),
         ]);
         return save({
           lastRunAt: new Date().toISOString(),
