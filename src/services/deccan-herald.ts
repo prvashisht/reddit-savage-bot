@@ -2,34 +2,52 @@ export type SpeakOutMeta = {
   title: string;
   imageUrl: string;
   pageUrl: string;
-  /** YYYY-MM-DD from the article URL slug (authoritative). */
+  /** YYYY-MM-DD from the URL slug, or a strict Speak Out H1 fallback. */
   isoDate: string;
 };
 
 const TAG_SLUGS = ['speak-out', 'opinion', 'dh-speak-out'] as const;
 const MONTHS: Record<string, string> = {
   january: '01',
+  jan: '01',
   february: '02',
+  feb: '02',
   march: '03',
+  mar: '03',
   april: '04',
+  apr: '04',
   may: '05',
   june: '06',
+  jun: '06',
   july: '07',
+  jul: '07',
   august: '08',
+  aug: '08',
   september: '09',
+  sept: '09',
+  sep: '09',
   october: '10',
+  oct: '10',
   november: '11',
+  nov: '11',
   december: '12',
+  dec: '12',
 };
 
-/** Parse YYYY-MM-DD from URLs like .../dh-speak-out-july-30-2026-4092593 */
-export function isoDateFromSpeakOutUrl(pageUrl: string): string | null {
-  const m = pageUrl.match(/speak-out-([a-z]+)-(\d{1,2})-(\d{4})(?:-|\b)/i);
-  if (!m) return null;
-  const month = MONTHS[m[1].toLowerCase()];
+/** How many undated slugs to open for an H1 date. Tag pages list newest first. */
+const MAX_UNDATED_H1_FETCHES = 5;
+
+type SpeakOutCandidate = {
+  url: string;
+  isoDate: string;
+  /** Set when the date came from an article fetch (undated slug). */
+  meta?: SpeakOutMeta;
+};
+
+function calendarIso(monthName: string, dayRaw: string, year: string): string | null {
+  const month = MONTHS[monthName.toLowerCase()];
   if (!month) return null;
-  const day = m[2].padStart(2, '0');
-  const year = m[3];
+  const day = dayRaw.padStart(2, '0');
   const iso = `${year}-${month}-${day}`;
   // Reject impossible calendar days without bringing in a full date lib.
   const probe = new Date(`${iso}T12:00:00+05:30`);
@@ -41,6 +59,31 @@ export function isoDateFromSpeakOutUrl(pageUrl: string): string | null {
     day: '2-digit',
   }).format(probe);
   return check === iso ? iso : null;
+}
+
+/** Parse YYYY-MM-DD from URLs like .../dh-speak-out-july-30-2026-4092593 */
+export function isoDateFromSpeakOutUrl(pageUrl: string): string | null {
+  const m = pageUrl.match(/speak-out-([a-z]+)-(\d{1,2})-(\d{4})(?:-|\b)/i);
+  if (!m) return null;
+  return calendarIso(m[1], m[2], m[3]);
+}
+
+/**
+ * Strict cartoon date from an article H1 / headline.
+ * Accepts only "DH Speak Out | August 31, 2026" or "Speak Out | Aug 6, 2025".
+ * Rejects SEO suffixes, colons, yearless strings, and raw Date.parse.
+ */
+export function isoDateFromHeadline(headline: string): string | null {
+  const m = headline
+    .trim()
+    .match(/^(?:dh\s+)?speak\s*out\s*\|\s*([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})\s*$/i);
+  if (!m) return null;
+  return calendarIso(m[1], m[2], m[3]);
+}
+
+/** Slug date wins; H1 is used only when the slug has no date. */
+export function resolveSpeakOutIsoDate(pageUrl: string, headline?: string | null): string | null {
+  return isoDateFromSpeakOutUrl(pageUrl) ?? (headline ? isoDateFromHeadline(headline) : null);
 }
 
 function localeTitleFromIso(isoDate: string): string {
@@ -65,45 +108,80 @@ function extractSpeakOutPaths(listHtml: string): string[] {
   return paths;
 }
 
-async function collectCandidateUrls(): Promise<string[]> {
-  const found = new Map<string, string>(); // isoDate -> url (first wins; tags ordered freshest-first)
+async function collectCandidates(): Promise<SpeakOutCandidate[]> {
+  const found = new Map<string, SpeakOutCandidate>(); // isoDate -> candidate (first wins)
+  const undated: string[] = [];
+  const seenUrls = new Set<string>();
 
-  await Promise.all(
+  const tagResults = await Promise.all(
     TAG_SLUGS.map(async (tag) => {
       const listUrl = `https://www.deccanherald.com/tags/${tag}`;
       // Short TTL: tag pages go stale, and dh-speak-out especially lags.
       const listResp = await fetch(listUrl, { cf: { cacheTtl: 60 } });
       if (!listResp.ok) {
         console.warn(`Tag fetch failed for "${tag}": ${listResp.status}`);
-        return;
+        return { tag, paths: [] as string[] };
       }
       const listHtml = await listResp.text();
       const paths = extractSpeakOutPaths(listHtml);
       if (!paths.length) {
         console.warn(`No Speak Out links found under tag "${tag}"`);
-        return;
       }
-
-      let newestOnTag: string | null = null;
-      for (const path of paths) {
-        const url = new URL(path, 'https://www.deccanherald.com').toString();
-        const iso = isoDateFromSpeakOutUrl(url);
-        if (!iso) continue;
-        if (!found.has(iso)) found.set(iso, url);
-        if (!newestOnTag || iso > newestOnTag) newestOnTag = iso;
-      }
-      console.log(
-        `Tag "${tag}": ${paths.length} speak-out link(s), newest slug date ${newestOnTag ?? 'unknown'}`,
-      );
+      return { tag, paths };
     }),
   );
 
-  return [...found.entries()]
-    .sort(([a], [b]) => b.localeCompare(a))
-    .map(([, url]) => url);
+  // Merge in tag order (speak-out first) so dedicated listings win ties.
+  for (const { tag, paths } of tagResults) {
+    let newestSlugOnTag: string | null = null;
+    let undatedOnTag = 0;
+    for (const path of paths) {
+      const url = new URL(path, 'https://www.deccanherald.com').toString();
+      if (seenUrls.has(url)) continue;
+      seenUrls.add(url);
+      const iso = isoDateFromSpeakOutUrl(url);
+      if (iso) {
+        if (!found.has(iso)) found.set(iso, { url, isoDate: iso });
+        if (!newestSlugOnTag || iso > newestSlugOnTag) newestSlugOnTag = iso;
+      } else {
+        undated.push(url);
+        undatedOnTag += 1;
+      }
+    }
+    console.log(
+      `Tag "${tag}": ${paths.length} speak-out link(s), newest slug date ${newestSlugOnTag ?? 'none'}, ${undatedOnTag} undated slug(s)`,
+    );
+  }
+
+  const toResolve = undated.slice(0, MAX_UNDATED_H1_FETCHES);
+  if (undated.length > toResolve.length) {
+    console.warn(
+      `Skipping ${undated.length - toResolve.length} extra undated Speak Out slug(s) (cap ${MAX_UNDATED_H1_FETCHES})`,
+    );
+  }
+
+  const h1Metas = await Promise.all(toResolve.map((url) => fetchSpeakOutMeta(url, null)));
+  for (let i = 0; i < toResolve.length; i++) {
+    const url = toResolve[i];
+    const meta = h1Metas[i];
+    if (!meta) {
+      console.warn(`Undated Speak Out slug has no strict H1 date — skipping ${url}`);
+      continue;
+    }
+    if (found.has(meta.isoDate)) {
+      console.log(
+        `H1 date ${meta.isoDate} from ${url} already has a dated slug — keeping slug URL`,
+      );
+      continue;
+    }
+    found.set(meta.isoDate, { url, isoDate: meta.isoDate, meta });
+    console.log(`H1 date ${meta.isoDate} from undated slug ${url}`);
+  }
+
+  return [...found.values()].sort((a, b) => b.isoDate.localeCompare(a.isoDate));
 }
 
-async function fetchSpeakOutMeta(pageUrl: string, isoDate: string): Promise<SpeakOutMeta | null> {
+async function fetchSpeakOutMeta(pageUrl: string, slugIso: string | null): Promise<SpeakOutMeta | null> {
   const articleResp = await fetch(pageUrl, { cf: { cacheTtl: 60 } });
   if (!articleResp.ok) {
     console.warn(`Failed article fetch ${pageUrl}: ${articleResp.status}`);
@@ -112,6 +190,7 @@ async function fetchSpeakOutMeta(pageUrl: string, isoDate: string): Promise<Spea
 
   let rawTitle = '';
   let imageUrl = '';
+  let h1Done = false;
 
   await new HTMLRewriter()
     .on('meta[property="og:image"]', {
@@ -122,7 +201,9 @@ async function fetchSpeakOutMeta(pageUrl: string, isoDate: string): Promise<Spea
     })
     .on('h1', {
       text(t) {
-        if (!rawTitle) rawTitle += t.text;
+        if (h1Done) return;
+        rawTitle += t.text;
+        if (t.lastInTextNode) h1Done = true;
       },
     })
     .transform(articleResp)
@@ -133,66 +214,42 @@ async function fetchSpeakOutMeta(pageUrl: string, isoDate: string): Promise<Spea
     return null;
   }
 
-  // Prefer slug date for the locale title so Workers/local TZ cannot drift.
-  let title = localeTitleFromIso(isoDate);
-  const parsed = rawTitle.trim().split('|').pop()?.trim() ?? rawTitle.trim();
-  if (parsed) {
-    const fromH1 = new Date(parsed);
-    if (!Number.isNaN(fromH1.getTime())) {
-      // Keep h1 wording only when it agrees with the slug day.
-      const h1Iso = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Asia/Kolkata',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(fromH1);
-      if (h1Iso === isoDate) {
-        title = fromH1.toLocaleDateString('en-US', {
-          weekday: 'long',
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric',
-          timeZone: 'Asia/Kolkata',
-        });
-      } else {
-        console.warn(
-          `H1 date "${parsed}" (${h1Iso}) disagrees with URL slug ${isoDate} — using slug`,
-        );
-      }
-    }
+  const headline = rawTitle.trim();
+  const h1Iso = isoDateFromHeadline(headline);
+  const isoDate = slugIso ?? h1Iso;
+  if (!isoDate) {
+    console.warn(`Could not parse Speak Out date from H1 "${headline}" (${pageUrl})`);
+    return null;
+  }
+  if (slugIso && h1Iso && h1Iso !== slugIso) {
+    console.warn(`H1 date ${h1Iso} disagrees with URL slug ${slugIso} — using slug`);
   }
 
-  return { title, imageUrl, pageUrl, isoDate };
+  return { title: localeTitleFromIso(isoDate), imageUrl, pageUrl, isoDate };
 }
 
 export async function getLatestSpeakOut(): Promise<SpeakOutMeta> {
-  // Collect every dated Speak Out URL across tags, then fetch meta for the newest
-  // slug date. The dh-speak-out tag often lags (stuck on an older cartoon) while
-  // speak-out / opinion already list the current day — taking only the first link
-  // per tag used to let that stale URL win when fresher tags failed or were empty.
-  const candidates = await collectCandidateUrls();
+  // Collect Speak Out URLs across tags, rank by slug date, and only then use a
+  // strict H1 date for slugs like speak-2-4129540 that omit month/day/year.
+  const candidates = await collectCandidates();
   if (!candidates.length) {
     throw new Error('Could not find latest Speak Out link across all tag pages');
   }
 
-  const ranked = candidates
-    .map((url) => ({ url, isoDate: isoDateFromSpeakOutUrl(url)! }))
-    .sort((a, b) => b.isoDate.localeCompare(a.isoDate));
-
   console.log(
-    `Speak Out candidates by slug date: ${ranked
+    `Speak Out candidates by date: ${candidates
       .slice(0, 5)
       .map((c) => c.isoDate)
-      .join(', ')}${ranked.length > 5 ? `, …(+${ranked.length - 5})` : ''}`,
+      .join(', ')}${candidates.length > 5 ? `, …(+${candidates.length - 5})` : ''}`,
   );
 
-  for (const { url, isoDate } of ranked.slice(0, 5)) {
-    const meta = await fetchSpeakOutMeta(url, isoDate);
+  for (const candidate of candidates.slice(0, 5)) {
+    const meta = candidate.meta ?? (await fetchSpeakOutMeta(candidate.url, candidate.isoDate));
     if (meta) {
       console.log(`Using Speak Out ${meta.isoDate}: "${meta.title}" (${meta.pageUrl})`);
       return meta;
     }
-    console.warn(`Skipping Speak Out candidate ${isoDate} — meta extract failed`);
+    console.warn(`Skipping Speak Out candidate ${candidate.isoDate} — meta extract failed`);
   }
 
   throw new Error('Could not extract metadata from any Speak Out article');
