@@ -13,17 +13,15 @@ import {
   type RedditPostContent,
 } from '../services/reddit';
 import {
+  composeFullTitle,
   detectPartyFromImage,
   generateCatchyTitle,
+  parseIsoDate,
   toIsoDate,
   TITLE_BRAND,
   type KnownParty,
 } from '../services/openai';
 import { putRunState, type RunState, type CommentResult, type FlairResult, type LogLevel, type LogEntry } from '../store/run-state';
-
-function envFlagOn(value: string | undefined): boolean {
-  return value === 'true' || value === '1';
-}
 
 /** Precomputed flair from the AI title pipeline.
  *  - object: reuse this party (skip vision flair)
@@ -32,19 +30,52 @@ function envFlagOn(value: string | undefined): boolean {
  */
 type TitleFlairHint = { party: KnownParty; person: string } | null | undefined;
 
-/** True if a Reddit title looks like it already covers this Speak Out day. */
-function titleMatchesSpeakout(redditTitle: string, speakoutLocaleTitle: string, isoDate: string | null): boolean {
-  if (redditTitle.includes(speakoutLocaleTitle)) return true;
-  if (isoDate && redditTitle.includes(isoDate)) return true;
-  return false;
+/**
+ * Cartoon date from titles we currently post:
+ * `phrase | 2026-08-14 | DH Speakout` (catchy or weekday).
+ * Ignore anything else — bump this when the title format changes.
+ */
+export function isoDateFromRedditTitle(redditTitle: string): string | null {
+  const brand = TITLE_BRAND.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = redditTitle.trim().match(new RegExp(`^(?:.+ \\| )?(\\d{4}-\\d{2}-\\d{2}) \\| ${brand}$`));
+  if (!m) return null;
+  return parseIsoDate(m[1]);
 }
 
-function legacyPostTitle(speakoutLocaleTitle: string): string {
-  return `DH Speakout | ${speakoutLocaleTitle}`;
+/** True if a Reddit title is our current Speak Out format for this day. */
+function titleMatchesSpeakout(redditTitle: string, isoDate: string | null): boolean {
+  return isoDate != null && isoDateFromRedditTitle(redditTitle) === isoDate;
 }
 
-function fallbackIsoTitle(isoDate: string): string {
-  return `${isoDate} | ${TITLE_BRAND}`;
+/** Skip if this day is already up, or if a branded Speak Out in /new is already later. */
+export function speakoutAlreadyOnReddit(redditTitle: string, isoDate: string | null): boolean {
+  return coveringSpeakoutInWindow([{ title: redditTitle }], isoDate) != null;
+}
+
+/** Newest branded cartoon date in a /new window that is on or after `isoDate`. */
+export function coveringSpeakoutInWindow<T extends { title: string }>(
+  posts: T[],
+  isoDate: string | null,
+): { post: T; postedIso: string } | null {
+  if (!isoDate) return null;
+  let best: { post: T; postedIso: string } | null = null;
+  for (const post of posts) {
+    const postedIso = isoDateFromRedditTitle(post.title);
+    if (!postedIso) continue;
+    if (!best || postedIso > best.postedIso) best = { post, postedIso };
+  }
+  if (!best || best.postedIso < isoDate) return null;
+  return best;
+}
+
+/** Same title shape as catchy, with the weekday as the phrase. */
+export function weekdayTitle(isoDate: string): string {
+  const d = new Date(`${isoDate}T12:00:00+05:30`);
+  const weekday = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    timeZone: 'Asia/Kolkata',
+  }).format(d);
+  return composeFullTitle(weekday, isoDate);
 }
 
 function makeLogger() {
@@ -66,6 +97,8 @@ function makeLogger() {
 }
 
 const SUBREDDIT = 'DHSavagery';
+/** How many /new posts to scan for an already-posted Speak Out (metas can sit on top). */
+const SKIP_LOOKBACK = 5;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export type RunOptions = {
@@ -153,7 +186,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     imageUrl: string,
     titleFlair?: TitleFlairHint,
   ): Promise<FlairResult> => {
-    // When USE_AI_TITLE already resolved a party, reuse it. null means skip (non-politician).
+    // When the catchy-title pipeline already resolved a party, reuse it. null means skip (non-politician).
     // undefined means run the dedicated vision flair path.
     if (titleFlair === null) {
       logger.log('Flair: skipped — speaker is not a flairable politician from AI title extract');
@@ -212,18 +245,32 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     }
 
     if (!skipLatestCheck) {
-      const recentPosts = await getRecentPosts(token, SUBREDDIT, 1);
-      const latestPost = recentPosts[0];
-      if (latestPost && titleMatchesSpeakout(latestPost.title, title, isoDate)) {
+      const recentPosts = await getRecentPosts(token, SUBREDDIT, SKIP_LOOKBACK);
+      const covering = coveringSpeakoutInWindow(recentPosts, isoDate);
+      if (covering) {
+        const { post: coveringPost, postedIso } = covering;
+        if (isoDate && postedIso > isoDate) {
+          // Don't attach this run's (older) source URL onto a newer post.
+          logger.log(
+            `Latest Reddit speakout (${postedIso}) is newer than DH "${title}" (${isoDate}) — skipping "${coveringPost.title}"`,
+          );
+          return save({
+            lastRunAt: new Date().toISOString(),
+            lastRunResult: 'skipped',
+            lastPostedTitle: coveringPost.title,
+            lastPostedUrl: coveringPost.permalink,
+            source,
+          });
+        }
         logger.log(
-          `Latest speakout posted already: DH "${title}" (${isoDate ?? 'no-iso'}) matches Reddit "${latestPost.title}"`,
+          `Latest speakout posted already: DH "${title}" (${isoDate ?? 'no-iso'}) matches Reddit "${coveringPost.title}"`,
         );
-        const commentResult = await tryEnsureComment(token, latestPost.name, pageUrl);
+        const commentResult = await tryEnsureComment(token, coveringPost.name, pageUrl);
         return save({
           lastRunAt: new Date().toISOString(),
           lastRunResult: 'skipped',
-          lastPostedTitle: latestPost.title,
-          lastPostedUrl: latestPost.permalink,
+          lastPostedTitle: coveringPost.title,
+          lastPostedUrl: coveringPost.permalink,
           commentResult,
           source,
         });
@@ -232,51 +279,53 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       logger.log('[SKIP_LATEST_CHECK] Skipping already-posted check');
     }
 
-    const useAiTitle = envFlagOn(env.USE_AI_TITLE);
-    let postTitle = legacyPostTitle(title);
-    // undefined → legacy vision flair; null/object → reuse (or skip) title-pipeline party
+    if (!isoDate) {
+      logger.error('Could not derive ISO date — cannot compose a title');
+      return save({
+        lastRunAt: new Date().toISOString(),
+        lastRunResult: 'failed',
+        lastError: 'Could not derive ISO date for title',
+        source,
+      });
+    }
+
+    let postTitle = weekdayTitle(isoDate);
+    // undefined → vision flair; null/object → reuse (or skip) title-pipeline party
     let titleFlair: TitleFlairHint = undefined;
 
-    if (useAiTitle) {
-      if (!env.OPENAI_API_KEY) {
-        logger.warn('[USE_AI_TITLE] OPENAI_API_KEY not set — falling back to legacy title');
-      } else if (!isoDate) {
-        logger.warn('[USE_AI_TITLE] Could not derive ISO date — falling back to legacy title');
-      } else {
-        try {
-          const generated = await generateCatchyTitle(env.OPENAI_API_KEY, imageUrl, { date: isoDate });
-          postTitle = generated.fullTitle;
-          const speaker = generated.extract.speaker;
-          const isPolitician = speaker?.kind === 'politician' && !!speaker.name?.trim();
+    if (!env.OPENAI_API_KEY) {
+      logger.warn('OPENAI_API_KEY not set — using weekday title');
+    } else {
+      try {
+        const generated = await generateCatchyTitle(env.OPENAI_API_KEY, imageUrl, { date: isoDate });
+        postTitle = generated.fullTitle;
+        const speaker = generated.extract.speaker;
+        const isPolitician = speaker?.kind === 'politician' && !!speaker.name?.trim();
 
-          if (generated.party) {
-            titleFlair = {
-              party: generated.party,
-              person: speaker?.name?.trim() || 'unknown',
-            };
-          } else if (isPolitician) {
-            // Politician lookup returned null/unrecognized — don't skip flair; fall back to vision path.
-            titleFlair = undefined;
-            logger.warn(
-              `[USE_AI_TITLE] Party unresolved for politician "${speaker!.name}" (${generated.partyReason ?? 'n/a'}) — will use flair vision fallback`,
-            );
-          } else {
-            titleFlair = null;
-          }
-
-          logger.log(
-            `[USE_AI_TITLE] Chose "${generated.phrase}" from [${generated.candidates.join(' | ')}] — ${generated.reason}` +
-              (generated.party
-                ? ` · party ${generated.party}`
-                : ` · party null (${generated.partyReason ?? 'n/a'})`),
-          );
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          logger.warn(`[USE_AI_TITLE] Generation failed (${msg}) — falling back to ${fallbackIsoTitle(isoDate)}`);
-          postTitle = fallbackIsoTitle(isoDate);
-          // Title pipeline failed before party — fall back to dedicated flair vision call.
+        if (generated.party) {
+          titleFlair = {
+            party: generated.party,
+            person: speaker?.name?.trim() || 'unknown',
+          };
+        } else if (isPolitician) {
           titleFlair = undefined;
+          logger.warn(
+            `Party unresolved for politician "${speaker!.name}" (${generated.partyReason ?? 'n/a'}) — will use flair vision fallback`,
+          );
+        } else {
+          titleFlair = null;
         }
+
+        logger.log(
+          `Catchy title: "${generated.phrase}" from [${generated.candidates.join(' | ')}] — ${generated.reason}` +
+            (generated.party
+              ? ` · party ${generated.party}`
+              : ` · party null (${generated.partyReason ?? 'n/a'})`),
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        logger.warn(`Catchy title failed (${msg}) — using ${postTitle}`);
+        titleFlair = undefined;
       }
     }
 
@@ -286,7 +335,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
         logger.log(`[DRY_RUN] Would flair from title pipeline: ${titleFlair.party} (${titleFlair.person})`);
       } else if (titleFlair === null) {
         logger.log('[DRY_RUN] Would skip flair — non-politician speaker from AI title extract');
-      } else if (useAiTitle) {
+      } else {
         logger.log('[DRY_RUN] Would flair via vision fallback (title party unresolved or title failed)');
       }
       return save({ lastRunAt: new Date().toISOString(), lastRunResult: 'dry_run', lastPostedTitle: postTitle, source });
@@ -305,7 +354,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       await sleep(3000);
       const newestPosts = await getRecentPosts(token, SUBREDDIT, 1);
       const newestPost = newestPosts[0];
-      if (!newestPost || !titleMatchesSpeakout(newestPost.title, title, isoDate)) {
+      if (!newestPost || !titleMatchesSpeakout(newestPost.title, isoDate)) {
         throw new Error(
           `Image post verification failed: newest post is "${newestPost?.title}", expected to match speakout "${title}"` +
             (isoDate ? ` or ${isoDate}` : ''),
@@ -339,7 +388,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
 
         await sleep(3000);
         const newestTitle = await getFirstPostTitle(token, SUBREDDIT);
-        if (!titleMatchesSpeakout(newestTitle, title, isoDate)) {
+        if (!titleMatchesSpeakout(newestTitle, isoDate)) {
           throw new Error(
             `Link post verification also failed: newest post is "${newestTitle}", expected to match speakout "${title}"` +
               (isoDate ? ` or ${isoDate}` : ''),
@@ -419,7 +468,7 @@ export async function ensureCommentOnLatestPost(env: Env): Promise<EnsureComment
       return { status: 'failed', error: 'No posts found in subreddit' };
     }
 
-    if (!titleMatchesSpeakout(latestPost.title, title, isoDate)) {
+    if (!titleMatchesSpeakout(latestPost.title, isoDate)) {
       return { status: 'title_mismatch', latestPostTitle: latestPost.title, speakoutTitle: title };
     }
 

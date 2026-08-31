@@ -21,6 +21,5 @@ preview_id = "621b589301984fad97f4515c25f4e302"
 
 # Plaintext vars are replaced on every `wrangler deploy` from this block.
 [vars]
-USE_AI_TITLE = "true"
 DRY_RUN = "false"
 SKIP_LATEST_CHECK = "false"
