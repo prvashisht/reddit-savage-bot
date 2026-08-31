@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isoDateFromRedditTitle, speakoutAlreadyOnReddit, weekdayTitle } from './run';
+import { isoDateFromRedditTitle, speakoutAlreadyOnReddit, coveringSpeakoutInWindow, weekdayTitle } from './run';
 import { TITLE_BRAND } from '../services/openai';
 
 describe('isoDateFromRedditTitle', () => {
@@ -53,5 +53,38 @@ describe('speakoutAlreadyOnReddit', () => {
 
   it('does not treat an unrelated ISO date as a Speak Out post', () => {
     expect(speakoutAlreadyOnReddit('Election schedule 2026-09-10', '2026-08-13')).toBe(false);
+  });
+});
+
+describe('coveringSpeakoutInWindow', () => {
+  const t = (phrase: string, iso: string) => `${phrase} | ${iso} | ${TITLE_BRAND}`;
+
+  it('finds a branded Speak Out under a meta post', () => {
+    const posts = [
+      { title: '[meta] sticky' },
+      { title: t('Lotus in the blender', '2026-08-14') },
+    ];
+    const covering = coveringSpeakoutInWindow(posts, '2026-08-14');
+    expect(covering?.postedIso).toBe('2026-08-14');
+    expect(covering?.post.title).toBe(t('Lotus in the blender', '2026-08-14'));
+  });
+
+  it('uses the latest cartoon date in the window, not post order', () => {
+    const posts = [
+      { title: t('older cartoon posted late', '2026-08-13') },
+      { title: t('Lotus in the blender', '2026-08-14') },
+    ];
+    expect(coveringSpeakoutInWindow(posts, '2026-08-13')?.postedIso).toBe('2026-08-14');
+    expect(coveringSpeakoutInWindow(posts, '2026-08-14')?.postedIso).toBe('2026-08-14');
+  });
+
+  it('does not skip when the window is behind DH', () => {
+    const posts = [{ title: '[meta] sticky' }, { title: t('Lotus in the blender', '2026-08-13') }];
+    expect(coveringSpeakoutInWindow(posts, '2026-08-14')).toBeNull();
+  });
+
+  it('ignores unrelated titles with ISO-looking dates', () => {
+    const posts = [{ title: 'Election schedule 2026-09-10' }, { title: '[meta] sticky' }];
+    expect(coveringSpeakoutInWindow(posts, '2026-08-13')).toBeNull();
   });
 });

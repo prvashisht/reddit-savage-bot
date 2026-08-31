@@ -47,11 +47,25 @@ function titleMatchesSpeakout(redditTitle: string, isoDate: string | null): bool
   return isoDate != null && isoDateFromRedditTitle(redditTitle) === isoDate;
 }
 
-/** Skip if this day is already up, or if /new is already a later cartoon. */
+/** Skip if this day is already up, or if a branded Speak Out in /new is already later. */
 export function speakoutAlreadyOnReddit(redditTitle: string, isoDate: string | null): boolean {
-  if (!isoDate) return false;
-  const postedIso = isoDateFromRedditTitle(redditTitle);
-  return postedIso != null && postedIso >= isoDate;
+  return coveringSpeakoutInWindow([{ title: redditTitle }], isoDate) != null;
+}
+
+/** Newest branded cartoon date in a /new window that is on or after `isoDate`. */
+export function coveringSpeakoutInWindow<T extends { title: string }>(
+  posts: T[],
+  isoDate: string | null,
+): { post: T; postedIso: string } | null {
+  if (!isoDate) return null;
+  let best: { post: T; postedIso: string } | null = null;
+  for (const post of posts) {
+    const postedIso = isoDateFromRedditTitle(post.title);
+    if (!postedIso) continue;
+    if (!best || postedIso > best.postedIso) best = { post, postedIso };
+  }
+  if (!best || best.postedIso < isoDate) return null;
+  return best;
 }
 
 /** Same title shape as catchy, with the weekday as the phrase. */
@@ -83,6 +97,8 @@ function makeLogger() {
 }
 
 const SUBREDDIT = 'DHSavagery';
+/** How many /new posts to scan for an already-posted Speak Out (metas can sit on top). */
+const SKIP_LOOKBACK = 5;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export type RunOptions = {
@@ -229,32 +245,32 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     }
 
     if (!skipLatestCheck) {
-      const recentPosts = await getRecentPosts(token, SUBREDDIT, 1);
-      const latestPost = recentPosts[0];
-      if (latestPost && speakoutAlreadyOnReddit(latestPost.title, isoDate)) {
-        const redditIso = isoDateFromRedditTitle(latestPost.title);
-        if (isoDate && redditIso && redditIso > isoDate) {
+      const recentPosts = await getRecentPosts(token, SUBREDDIT, SKIP_LOOKBACK);
+      const covering = coveringSpeakoutInWindow(recentPosts, isoDate);
+      if (covering) {
+        const { post: coveringPost, postedIso } = covering;
+        if (isoDate && postedIso > isoDate) {
           // Don't attach this run's (older) source URL onto a newer post.
           logger.log(
-            `Latest Reddit post (${redditIso}) is newer than DH "${title}" (${isoDate}) — skipping "${latestPost.title}"`,
+            `Latest Reddit speakout (${postedIso}) is newer than DH "${title}" (${isoDate}) — skipping "${coveringPost.title}"`,
           );
           return save({
             lastRunAt: new Date().toISOString(),
             lastRunResult: 'skipped',
-            lastPostedTitle: latestPost.title,
-            lastPostedUrl: latestPost.permalink,
+            lastPostedTitle: coveringPost.title,
+            lastPostedUrl: coveringPost.permalink,
             source,
           });
         }
         logger.log(
-          `Latest speakout posted already: DH "${title}" (${isoDate ?? 'no-iso'}) matches Reddit "${latestPost.title}"`,
+          `Latest speakout posted already: DH "${title}" (${isoDate ?? 'no-iso'}) matches Reddit "${coveringPost.title}"`,
         );
-        const commentResult = await tryEnsureComment(token, latestPost.name, pageUrl);
+        const commentResult = await tryEnsureComment(token, coveringPost.name, pageUrl);
         return save({
           lastRunAt: new Date().toISOString(),
           lastRunResult: 'skipped',
-          lastPostedTitle: latestPost.title,
-          lastPostedUrl: latestPost.permalink,
+          lastPostedTitle: coveringPost.title,
+          lastPostedUrl: coveringPost.permalink,
           commentResult,
           source,
         });
