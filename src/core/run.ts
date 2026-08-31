@@ -13,6 +13,7 @@ import {
   type RedditPostContent,
 } from '../services/reddit';
 import {
+  composeFullTitle,
   detectPartyFromImage,
   generateCatchyTitle,
   parseIsoDate,
@@ -21,10 +22,6 @@ import {
   type KnownParty,
 } from '../services/openai';
 import { putRunState, type RunState, type CommentResult, type FlairResult, type LogLevel, type LogEntry } from '../store/run-state';
-
-function envFlagOn(value: string | undefined): boolean {
-  return value === 'true' || value === '1';
-}
 
 /** Precomputed flair from the AI title pipeline.
  *  - object: reuse this party (skip vision flair)
@@ -35,7 +32,7 @@ type TitleFlairHint = { party: KnownParty; person: string } | null | undefined;
 
 /**
  * Cartoon date from titles we currently post:
- * `phrase | 2026-08-14 | DH Speakout` or `2026-08-14 | DH Speakout`.
+ * `phrase | 2026-08-14 | DH Speakout` (catchy or weekday).
  * Ignore anything else — bump this when the title format changes.
  */
 export function isoDateFromRedditTitle(redditTitle: string): string | null {
@@ -57,12 +54,14 @@ export function speakoutAlreadyOnReddit(redditTitle: string, isoDate: string | n
   return postedIso != null && postedIso >= isoDate;
 }
 
-function legacyPostTitle(speakoutLocaleTitle: string): string {
-  return `DH Speakout | ${speakoutLocaleTitle}`;
-}
-
-function fallbackIsoTitle(isoDate: string): string {
-  return `${isoDate} | ${TITLE_BRAND}`;
+/** Same title shape as catchy, with the weekday as the phrase. */
+export function weekdayTitle(isoDate: string): string {
+  const d = new Date(`${isoDate}T12:00:00+05:30`);
+  const weekday = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    timeZone: 'Asia/Kolkata',
+  }).format(d);
+  return composeFullTitle(weekday, isoDate);
 }
 
 function makeLogger() {
@@ -171,7 +170,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     imageUrl: string,
     titleFlair?: TitleFlairHint,
   ): Promise<FlairResult> => {
-    // When USE_AI_TITLE already resolved a party, reuse it. null means skip (non-politician).
+    // When the catchy-title pipeline already resolved a party, reuse it. null means skip (non-politician).
     // undefined means run the dedicated vision flair path.
     if (titleFlair === null) {
       logger.log('Flair: skipped — speaker is not a flairable politician from AI title extract');
@@ -264,51 +263,53 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       logger.log('[SKIP_LATEST_CHECK] Skipping already-posted check');
     }
 
-    const useAiTitle = envFlagOn(env.USE_AI_TITLE);
-    let postTitle = legacyPostTitle(title);
-    // undefined → legacy vision flair; null/object → reuse (or skip) title-pipeline party
+    if (!isoDate) {
+      logger.error('Could not derive ISO date — cannot compose a title');
+      return save({
+        lastRunAt: new Date().toISOString(),
+        lastRunResult: 'failed',
+        lastError: 'Could not derive ISO date for title',
+        source,
+      });
+    }
+
+    let postTitle = weekdayTitle(isoDate);
+    // undefined → vision flair; null/object → reuse (or skip) title-pipeline party
     let titleFlair: TitleFlairHint = undefined;
 
-    if (useAiTitle) {
-      if (!env.OPENAI_API_KEY) {
-        logger.warn('[USE_AI_TITLE] OPENAI_API_KEY not set — falling back to legacy title');
-      } else if (!isoDate) {
-        logger.warn('[USE_AI_TITLE] Could not derive ISO date — falling back to legacy title');
-      } else {
-        try {
-          const generated = await generateCatchyTitle(env.OPENAI_API_KEY, imageUrl, { date: isoDate });
-          postTitle = generated.fullTitle;
-          const speaker = generated.extract.speaker;
-          const isPolitician = speaker?.kind === 'politician' && !!speaker.name?.trim();
+    if (!env.OPENAI_API_KEY) {
+      logger.warn('OPENAI_API_KEY not set — using weekday title');
+    } else {
+      try {
+        const generated = await generateCatchyTitle(env.OPENAI_API_KEY, imageUrl, { date: isoDate });
+        postTitle = generated.fullTitle;
+        const speaker = generated.extract.speaker;
+        const isPolitician = speaker?.kind === 'politician' && !!speaker.name?.trim();
 
-          if (generated.party) {
-            titleFlair = {
-              party: generated.party,
-              person: speaker?.name?.trim() || 'unknown',
-            };
-          } else if (isPolitician) {
-            // Politician lookup returned null/unrecognized — don't skip flair; fall back to vision path.
-            titleFlair = undefined;
-            logger.warn(
-              `[USE_AI_TITLE] Party unresolved for politician "${speaker!.name}" (${generated.partyReason ?? 'n/a'}) — will use flair vision fallback`,
-            );
-          } else {
-            titleFlair = null;
-          }
-
-          logger.log(
-            `[USE_AI_TITLE] Chose "${generated.phrase}" from [${generated.candidates.join(' | ')}] — ${generated.reason}` +
-              (generated.party
-                ? ` · party ${generated.party}`
-                : ` · party null (${generated.partyReason ?? 'n/a'})`),
-          );
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          logger.warn(`[USE_AI_TITLE] Generation failed (${msg}) — falling back to ${fallbackIsoTitle(isoDate)}`);
-          postTitle = fallbackIsoTitle(isoDate);
-          // Title pipeline failed before party — fall back to dedicated flair vision call.
+        if (generated.party) {
+          titleFlair = {
+            party: generated.party,
+            person: speaker?.name?.trim() || 'unknown',
+          };
+        } else if (isPolitician) {
           titleFlair = undefined;
+          logger.warn(
+            `Party unresolved for politician "${speaker!.name}" (${generated.partyReason ?? 'n/a'}) — will use flair vision fallback`,
+          );
+        } else {
+          titleFlair = null;
         }
+
+        logger.log(
+          `Catchy title: "${generated.phrase}" from [${generated.candidates.join(' | ')}] — ${generated.reason}` +
+            (generated.party
+              ? ` · party ${generated.party}`
+              : ` · party null (${generated.partyReason ?? 'n/a'})`),
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        logger.warn(`Catchy title failed (${msg}) — using ${postTitle}`);
+        titleFlair = undefined;
       }
     }
 
@@ -318,7 +319,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
         logger.log(`[DRY_RUN] Would flair from title pipeline: ${titleFlair.party} (${titleFlair.person})`);
       } else if (titleFlair === null) {
         logger.log('[DRY_RUN] Would skip flair — non-politician speaker from AI title extract');
-      } else if (useAiTitle) {
+      } else {
         logger.log('[DRY_RUN] Would flair via vision fallback (title party unresolved or title failed)');
       }
       return save({ lastRunAt: new Date().toISOString(), lastRunResult: 'dry_run', lastPostedTitle: postTitle, source });

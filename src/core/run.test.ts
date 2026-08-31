@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isoDateFromRedditTitle, speakoutAlreadyOnReddit } from './run';
+import { isoDateFromRedditTitle, speakoutAlreadyOnReddit, weekdayTitle } from './run';
 import { TITLE_BRAND } from '../services/openai';
 
 describe('isoDateFromRedditTitle', () => {
@@ -7,6 +7,7 @@ describe('isoDateFromRedditTitle', () => {
     expect(isoDateFromRedditTitle(`Lotus in the blender | 2026-08-14 | ${TITLE_BRAND}`)).toBe(
       '2026-08-14',
     );
+    expect(isoDateFromRedditTitle(`Monday | 2026-08-31 | ${TITLE_BRAND}`)).toBe('2026-08-31');
     expect(isoDateFromRedditTitle(`2026-08-14 | ${TITLE_BRAND}`)).toBe('2026-08-14');
   });
 
@@ -23,11 +24,19 @@ describe('isoDateFromRedditTitle', () => {
   });
 });
 
+describe('weekdayTitle', () => {
+  it('uses the weekday as the phrase', () => {
+    expect(weekdayTitle('2026-08-31')).toBe(`Monday | 2026-08-31 | ${TITLE_BRAND}`);
+    expect(weekdayTitle('2026-08-14')).toBe(`Friday | 2026-08-14 | ${TITLE_BRAND}`);
+  });
+});
+
 describe('speakoutAlreadyOnReddit', () => {
   it('treats the same day as already posted', () => {
     expect(
       speakoutAlreadyOnReddit(`Lotus in the blender | 2026-08-14 | ${TITLE_BRAND}`, '2026-08-14'),
     ).toBe(true);
+    expect(speakoutAlreadyOnReddit(`Friday | 2026-08-14 | ${TITLE_BRAND}`, '2026-08-14')).toBe(true);
   });
 
   it('skips when /new is already a later cartoon', () => {
