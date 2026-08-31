@@ -33,38 +33,25 @@ function envFlagOn(value: string | undefined): boolean {
  */
 type TitleFlairHint = { party: KnownParty; person: string } | null | undefined;
 
-/** True if a Reddit title looks like it already covers this Speak Out day. */
-function titleMatchesSpeakout(redditTitle: string, speakoutLocaleTitle: string, isoDate: string | null): boolean {
-  if (redditTitle.includes(speakoutLocaleTitle)) return true;
-  if (isoDate && redditTitle.includes(isoDate)) return true;
-  return false;
+/**
+ * Cartoon date from titles we currently post:
+ * `phrase | 2026-08-14 | DH Speakout` or `2026-08-14 | DH Speakout`.
+ * Ignore anything else — bump this when the title format changes.
+ */
+export function isoDateFromRedditTitle(redditTitle: string): string | null {
+  const brand = TITLE_BRAND.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = redditTitle.trim().match(new RegExp(`^(?:.+ \\| )?(\\d{4}-\\d{2}-\\d{2}) \\| ${brand}$`));
+  if (!m) return null;
+  return parseIsoDate(m[1]);
 }
 
-/** Cartoon date from titles we actually post: `phrase | 2026-08-14 | DH Speakout` or the old locale form. */
-export function isoDateFromRedditTitle(redditTitle: string): string | null {
-  const isoHits = [...redditTitle.matchAll(/\d{4}-\d{2}-\d{2}/g)]
-    .map((m) => parseIsoDate(m[0]))
-    .filter((iso): iso is string => iso != null);
-  if (isoHits.length) return isoHits[isoHits.length - 1];
-
-  const localeHit = redditTitle.match(
-    /(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+[A-Za-z]+ \d{1,2}, \d{4}/,
-  );
-  if (!localeHit) return null;
-  try {
-    return toIsoDate(localeHit[0]);
-  } catch {
-    return null;
-  }
+/** True if a Reddit title is our current Speak Out format for this day. */
+function titleMatchesSpeakout(redditTitle: string, isoDate: string | null): boolean {
+  return isoDate != null && isoDateFromRedditTitle(redditTitle) === isoDate;
 }
 
 /** Skip if this day is already up, or if /new is already a later cartoon. */
-export function speakoutAlreadyOnReddit(
-  redditTitle: string,
-  speakoutLocaleTitle: string,
-  isoDate: string | null,
-): boolean {
-  if (titleMatchesSpeakout(redditTitle, speakoutLocaleTitle, isoDate)) return true;
+export function speakoutAlreadyOnReddit(redditTitle: string, isoDate: string | null): boolean {
   if (!isoDate) return false;
   const postedIso = isoDateFromRedditTitle(redditTitle);
   return postedIso != null && postedIso >= isoDate;
@@ -245,17 +232,24 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     if (!skipLatestCheck) {
       const recentPosts = await getRecentPosts(token, SUBREDDIT, 1);
       const latestPost = recentPosts[0];
-      if (latestPost && speakoutAlreadyOnReddit(latestPost.title, title, isoDate)) {
+      if (latestPost && speakoutAlreadyOnReddit(latestPost.title, isoDate)) {
         const redditIso = isoDateFromRedditTitle(latestPost.title);
         if (isoDate && redditIso && redditIso > isoDate) {
+          // Don't attach this run's (older) source URL onto a newer post.
           logger.log(
             `Latest Reddit post (${redditIso}) is newer than DH "${title}" (${isoDate}) — skipping "${latestPost.title}"`,
           );
-        } else {
-          logger.log(
-            `Latest speakout posted already: DH "${title}" (${isoDate ?? 'no-iso'}) matches Reddit "${latestPost.title}"`,
-          );
+          return save({
+            lastRunAt: new Date().toISOString(),
+            lastRunResult: 'skipped',
+            lastPostedTitle: latestPost.title,
+            lastPostedUrl: latestPost.permalink,
+            source,
+          });
         }
+        logger.log(
+          `Latest speakout posted already: DH "${title}" (${isoDate ?? 'no-iso'}) matches Reddit "${latestPost.title}"`,
+        );
         const commentResult = await tryEnsureComment(token, latestPost.name, pageUrl);
         return save({
           lastRunAt: new Date().toISOString(),
@@ -343,7 +337,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
       await sleep(3000);
       const newestPosts = await getRecentPosts(token, SUBREDDIT, 1);
       const newestPost = newestPosts[0];
-      if (!newestPost || !titleMatchesSpeakout(newestPost.title, title, isoDate)) {
+      if (!newestPost || !titleMatchesSpeakout(newestPost.title, isoDate)) {
         throw new Error(
           `Image post verification failed: newest post is "${newestPost?.title}", expected to match speakout "${title}"` +
             (isoDate ? ` or ${isoDate}` : ''),
@@ -377,7 +371,7 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
 
         await sleep(3000);
         const newestTitle = await getFirstPostTitle(token, SUBREDDIT);
-        if (!titleMatchesSpeakout(newestTitle, title, isoDate)) {
+        if (!titleMatchesSpeakout(newestTitle, isoDate)) {
           throw new Error(
             `Link post verification also failed: newest post is "${newestTitle}", expected to match speakout "${title}"` +
               (isoDate ? ` or ${isoDate}` : ''),
@@ -457,7 +451,7 @@ export async function ensureCommentOnLatestPost(env: Env): Promise<EnsureComment
       return { status: 'failed', error: 'No posts found in subreddit' };
     }
 
-    if (!titleMatchesSpeakout(latestPost.title, title, isoDate)) {
+    if (!titleMatchesSpeakout(latestPost.title, isoDate)) {
       return { status: 'title_mismatch', latestPostTitle: latestPost.title, speakoutTitle: title };
     }
 

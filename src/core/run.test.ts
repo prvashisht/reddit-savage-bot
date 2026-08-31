@@ -16,11 +16,9 @@ describe('isoDateFromRedditTitle', () => {
     ).toBe('2026-08-14');
   });
 
-  it('reads the old locale titles', () => {
-    expect(isoDateFromRedditTitle('DH Speakout | Monday, August 31, 2026')).toBe('2026-08-31');
-  });
-
-  it('returns null when there is no date', () => {
+  it('ignores titles that are not the current Speak Out format', () => {
+    expect(isoDateFromRedditTitle('Election schedule 2026-09-10')).toBeNull();
+    expect(isoDateFromRedditTitle('DH Speakout | Monday, August 31, 2026')).toBeNull();
     expect(isoDateFromRedditTitle('random dump')).toBeNull();
   });
 });
@@ -28,41 +26,23 @@ describe('isoDateFromRedditTitle', () => {
 describe('speakoutAlreadyOnReddit', () => {
   it('treats the same day as already posted', () => {
     expect(
-      speakoutAlreadyOnReddit(
-        `Lotus in the blender | 2026-08-14 | ${TITLE_BRAND}`,
-        'Friday, August 14, 2026',
-        '2026-08-14',
-      ),
+      speakoutAlreadyOnReddit(`Lotus in the blender | 2026-08-14 | ${TITLE_BRAND}`, '2026-08-14'),
     ).toBe(true);
   });
 
   it('skips when /new is already a later cartoon', () => {
     expect(
-      speakoutAlreadyOnReddit(
-        `Lotus in the blender | 2026-08-14 | ${TITLE_BRAND}`,
-        'Thursday, August 13, 2026',
-        '2026-08-13',
-      ),
+      speakoutAlreadyOnReddit(`Lotus in the blender | 2026-08-14 | ${TITLE_BRAND}`, '2026-08-13'),
     ).toBe(true);
   });
 
   it('does not skip when Reddit is behind', () => {
     expect(
-      speakoutAlreadyOnReddit(
-        `Lotus in the blender | 2026-08-13 | ${TITLE_BRAND}`,
-        'Friday, August 14, 2026',
-        '2026-08-14',
-      ),
+      speakoutAlreadyOnReddit(`Lotus in the blender | 2026-08-13 | ${TITLE_BRAND}`, '2026-08-14'),
     ).toBe(false);
   });
 
-  it('skips a newer locale title too', () => {
-    expect(
-      speakoutAlreadyOnReddit(
-        'DH Speakout | Friday, August 14, 2026',
-        'Thursday, August 13, 2026',
-        '2026-08-13',
-      ),
-    ).toBe(true);
+  it('does not treat an unrelated ISO date as a Speak Out post', () => {
+    expect(speakoutAlreadyOnReddit('Election schedule 2026-09-10', '2026-08-13')).toBe(false);
   });
 });
