@@ -15,6 +15,7 @@ import {
 import {
   detectPartyFromImage,
   generateCatchyTitle,
+  parseIsoDate,
   toIsoDate,
   TITLE_BRAND,
   type KnownParty,
@@ -37,6 +38,36 @@ function titleMatchesSpeakout(redditTitle: string, speakoutLocaleTitle: string, 
   if (redditTitle.includes(speakoutLocaleTitle)) return true;
   if (isoDate && redditTitle.includes(isoDate)) return true;
   return false;
+}
+
+/** Cartoon date from titles we actually post: `phrase | 2026-08-14 | DH Speakout` or the old locale form. */
+export function isoDateFromRedditTitle(redditTitle: string): string | null {
+  const isoHits = [...redditTitle.matchAll(/\d{4}-\d{2}-\d{2}/g)]
+    .map((m) => parseIsoDate(m[0]))
+    .filter((iso): iso is string => iso != null);
+  if (isoHits.length) return isoHits[isoHits.length - 1];
+
+  const localeHit = redditTitle.match(
+    /(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+[A-Za-z]+ \d{1,2}, \d{4}/,
+  );
+  if (!localeHit) return null;
+  try {
+    return toIsoDate(localeHit[0]);
+  } catch {
+    return null;
+  }
+}
+
+/** Skip if this day is already up, or if /new is already a later cartoon. */
+export function speakoutAlreadyOnReddit(
+  redditTitle: string,
+  speakoutLocaleTitle: string,
+  isoDate: string | null,
+): boolean {
+  if (titleMatchesSpeakout(redditTitle, speakoutLocaleTitle, isoDate)) return true;
+  if (!isoDate) return false;
+  const postedIso = isoDateFromRedditTitle(redditTitle);
+  return postedIso != null && postedIso >= isoDate;
 }
 
 function legacyPostTitle(speakoutLocaleTitle: string): string {
@@ -214,10 +245,17 @@ export async function runBot(env: Env, options: RunOptions = {}): Promise<RunSta
     if (!skipLatestCheck) {
       const recentPosts = await getRecentPosts(token, SUBREDDIT, 1);
       const latestPost = recentPosts[0];
-      if (latestPost && titleMatchesSpeakout(latestPost.title, title, isoDate)) {
-        logger.log(
-          `Latest speakout posted already: DH "${title}" (${isoDate ?? 'no-iso'}) matches Reddit "${latestPost.title}"`,
-        );
+      if (latestPost && speakoutAlreadyOnReddit(latestPost.title, title, isoDate)) {
+        const redditIso = isoDateFromRedditTitle(latestPost.title);
+        if (isoDate && redditIso && redditIso > isoDate) {
+          logger.log(
+            `Latest Reddit post (${redditIso}) is newer than DH "${title}" (${isoDate}) — skipping "${latestPost.title}"`,
+          );
+        } else {
+          logger.log(
+            `Latest speakout posted already: DH "${title}" (${isoDate ?? 'no-iso'}) matches Reddit "${latestPost.title}"`,
+          );
+        }
         const commentResult = await tryEnsureComment(token, latestPost.name, pageUrl);
         return save({
           lastRunAt: new Date().toISOString(),
